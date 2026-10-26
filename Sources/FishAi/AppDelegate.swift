@@ -1,25 +1,38 @@
 import AppKit
+import Combine
 import SwiftUI
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private var hotKey: HotKey?
+    private var screenshotItem: NSMenuItem!
+    private var clipboardItem: NSMenuItem!
+    private var hotKeys: [HotKey] = []
+    private var cancellables = Set<AnyCancellable>()
+    private let settings = AppSettings.shared
     private let panel = ResultPanelController()
     private var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMainMenu()
         setupStatusItem()
-        // ⌥S：截图翻译
-        hotKey = HotKey(keyCode: HotKey.kVK_S, modifiers: HotKey.optionKey) { [weak self] in
-            self?.screenshotTranslate()
-        }
-        // 调试用：FishAi --image <path> 跳过截图，直接识别并翻译该图片
+        registerHotKeys()
+        // @Published 在赋值前发出通知，延后一拍再读取新值
+        settings.$screenshotShortcut.map { _ in () }
+            .merge(with: settings.$clipboardShortcut.map { _ in () },
+                   settings.$isRecordingShortcut.map { _ in () })
+            .dropFirst(3)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.registerHotKeys() }
+            .store(in: &cancellables)
+
+        // 调试用：--image <path> 跳过截图直接识别翻译该图片；--clipboard 等同于按下剪贴板翻译快捷键
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--image"), i + 1 < args.count,
            let image = NSImage(contentsOfFile: args[i + 1])?.cgImage(forProposedRect: nil, context: nil, hints: nil) {
             Task { await recognizeAndTranslate(image) }
+        } else if args.contains("--clipboard") {
+            clipboardTranslate()
         }
     }
 
@@ -28,14 +41,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.image = NSImage(systemSymbolName: "character.bubble", accessibilityDescription: "FishAi")
 
         let menu = NSMenu()
-        let capture = NSMenuItem(title: "截图翻译", action: #selector(screenshotTranslate), keyEquivalent: "s")
-        capture.keyEquivalentModifierMask = [.option]
-        capture.target = self
-        menu.addItem(capture)
-        let settings = NSMenuItem(title: "设置…", action: #selector(openSettings), keyEquivalent: ",")
-        settings.target = self
-        menu.addItem(settings)
+        screenshotItem = NSMenuItem(title: "截图翻译", action: #selector(screenshotTranslate), keyEquivalent: "")
+        screenshotItem.target = self
+        menu.addItem(screenshotItem)
+        clipboardItem = NSMenuItem(title: "剪贴板翻译", action: #selector(clipboardTranslate), keyEquivalent: "")
+        clipboardItem.target = self
+        menu.addItem(clipboardItem)
         menu.addItem(.separator())
+        let settingsItem = NSMenuItem(title: "设置…", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
         menu.addItem(NSMenuItem(title: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
     }
@@ -65,6 +80,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = mainMenu
     }
 
+    /// 按当前设置重新注册全局快捷键，并同步到菜单项
+    private func registerHotKeys() {
+        hotKeys.removeAll() // 释放时自动注销
+        var conflicts = Set<AppSettings.ShortcutAction>()
+        let bindings: [(AppSettings.ShortcutAction, Shortcut?, NSMenuItem, () -> Void)] = [
+            (.screenshot, settings.screenshotShortcut, screenshotItem, { [weak self] in self?.screenshotTranslate() }),
+            (.clipboard, settings.clipboardShortcut, clipboardItem, { [weak self] in self?.clipboardTranslate() }),
+        ]
+        for (action, shortcut, item, handler) in bindings {
+            item.keyEquivalent = shortcut?.menuKeyEquivalent?.0 ?? ""
+            item.keyEquivalentModifierMask = shortcut?.menuKeyEquivalent?.1 ?? []
+            guard let shortcut, !settings.isRecordingShortcut else { continue }
+            if let hotKey = HotKey(shortcut, handler: handler) {
+                hotKeys.append(hotKey)
+            } else {
+                conflicts.insert(action)
+            }
+        }
+        if !settings.isRecordingShortcut { settings.shortcutConflicts = conflicts }
+    }
+
     @objc func openSettings() {
         if settingsWindow == nil {
             let window = NSWindow(contentViewController: NSHostingController(rootView: SettingsView()))
@@ -83,6 +119,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             guard let image = await ScreenCapture.captureInteractively() else { return }
             await recognizeAndTranslate(image)
+        }
+    }
+
+    /// 翻译剪贴板内容：优先取文字，没有文字时识别剪贴板中的图片
+    @objc func clipboardTranslate() {
+        let pasteboard = NSPasteboard.general
+        if let text = pasteboard.string(forType: .string),
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            panel.show()
+            panel.model.setSource(text)
+        } else if let image = (pasteboard.readObjects(forClasses: [NSImage.self]) as? [NSImage])?.first,
+                  let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            Task { await recognizeAndTranslate(cgImage) }
+        } else {
+            panel.show()
+            panel.model.beginRecognizing()
+            panel.model.fail("剪贴板中没有文字或图片")
         }
     }
 

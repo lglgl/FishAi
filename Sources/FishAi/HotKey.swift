@@ -2,9 +2,6 @@ import Carbon.HIToolbox
 
 /// 基于 Carbon RegisterEventHotKey 的全局快捷键，不需要辅助功能权限。
 final class HotKey {
-    static let kVK_S = UInt32(Carbon.kVK_ANSI_S)
-    static let optionKey = UInt32(Carbon.optionKey)
-
     private static var handlers: [UInt32: () -> Void] = [:]
     private static var nextID: UInt32 = 1
     private static var eventHandlerInstalled = false
@@ -12,14 +9,17 @@ final class HotKey {
     private var ref: EventHotKeyRef?
     private let id: UInt32
 
-    init(keyCode: UInt32, modifiers: UInt32, handler: @escaping () -> Void) {
+    /// 注册失败（如已被其他应用占用）时返回 nil
+    init?(_ shortcut: Shortcut, handler: @escaping () -> Void) {
         HotKey.installEventHandlerIfNeeded()
         id = HotKey.nextID
         HotKey.nextID += 1
-        HotKey.handlers[id] = handler
 
         let hotKeyID = EventHotKeyID(signature: OSType(0x4649_5348), id: id) // "FISH"
-        RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &ref)
+        let status = RegisterEventHotKey(shortcut.keyCode, shortcut.modifiers, hotKeyID,
+                                         GetApplicationEventTarget(), 0, &ref)
+        guard status == noErr else { return nil }
+        HotKey.handlers[id] = handler
     }
 
     deinit {

@@ -1,3 +1,4 @@
+import Carbon.HIToolbox
 import SwiftUI
 
 struct SettingsView: View {
@@ -10,6 +11,22 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section {
+                LabeledContent("截图翻译") {
+                    ShortcutRecorder(shortcut: $settings.screenshotShortcut, defaultValue: .screenshotDefault,
+                                     conflict: settings.shortcutConflicts.contains(.screenshot))
+                }
+                LabeledContent("剪贴板翻译") {
+                    ShortcutRecorder(shortcut: $settings.clipboardShortcut, defaultValue: .clipboardDefault,
+                                     conflict: settings.shortcutConflicts.contains(.clipboard))
+                }
+            } header: {
+                Text("快捷键")
+            } footer: {
+                Text("点击后按下组合键（需包含 ⌘、⌥ 或 ⌃），Esc 取消。剪贴板翻译会翻译剪贴板中的文字，若是图片则先识别文字。")
+                    .foregroundStyle(.secondary)
+            }
+
             Section("翻译服务") {
                 Toggle("系统翻译（离线）", isOn: $settings.systemEnabled)
                 Toggle("OpenAI 兼容接口", isOn: $settings.openAIEnabled)
@@ -58,7 +75,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 500, height: 600)
+        .frame(width: 500, height: 680)
     }
 
     private func testConnection() {
@@ -75,5 +92,75 @@ struct SettingsView: View {
                 testState = .failure(error.localizedDescription)
             }
         }
+    }
+}
+
+/// 点击后录制下一次按键组合
+private struct ShortcutRecorder: View {
+    @Binding var shortcut: Shortcut?
+    let defaultValue: Shortcut
+    let conflict: Bool
+
+    @State private var recording = false
+    @State private var monitor: Any?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if conflict && !recording {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .help("快捷键已被其他应用占用")
+            }
+            Button(action: toggleRecording) {
+                Text(recording ? "按下快捷键…" : shortcut?.displayString ?? "未设置")
+                    .frame(minWidth: 90)
+            }
+            Button {
+                shortcut = nil
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("清除")
+            .disabled(shortcut == nil)
+            Button {
+                shortcut = defaultValue
+            } label: {
+                Image(systemName: "arrow.counterclockwise")
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("恢复默认（\(defaultValue.displayString)）")
+        }
+        .onDisappear(perform: stopRecording)
+    }
+
+    private func toggleRecording() {
+        recording ? stopRecording() : startRecording()
+    }
+
+    private func startRecording() {
+        recording = true
+        AppSettings.shared.isRecordingShortcut = true
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == UInt16(kVK_Escape) {
+                stopRecording()
+            } else if let recorded = Shortcut(event: event) {
+                shortcut = recorded
+                stopRecording()
+            } else {
+                NSSound.beep()
+            }
+            return nil
+        }
+    }
+
+    private func stopRecording() {
+        guard recording else { return }
+        recording = false
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        AppSettings.shared.isRecordingShortcut = false
     }
 }
