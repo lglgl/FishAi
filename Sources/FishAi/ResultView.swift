@@ -4,12 +4,25 @@ import Translation
 
 struct ResultView: View {
     @ObservedObject var model: TranslatorModel
+    @ObservedObject var settings = AppSettings.shared
 
     var body: some View {
         VStack(spacing: 10) {
             sourceCard
             languageBar
-            resultCard
+            if settings.systemEnabled {
+                ServiceCard(symbol: "apple.logo", title: "系统翻译", result: model.system)
+            }
+            if settings.openAIEnabled {
+                ServiceCard(symbol: "sparkles", title: settings.model, result: model.openAI)
+            }
+            if !settings.systemEnabled && !settings.openAIEnabled {
+                Text("请在设置中启用至少一个翻译服务")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .cardBackground()
+            }
         }
         .padding(.horizontal, 12)
         .padding(.bottom, 12)
@@ -28,7 +41,7 @@ struct ResultView: View {
                     .font(.system(size: 14))
                     .scrollContentBackground(.hidden)
                     .frame(minHeight: 70, maxHeight: 140)
-                if model.phase == .recognizing {
+                if model.isRecognizing {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
                         Text("正在识别文字…").foregroundStyle(.secondary)
@@ -36,6 +49,12 @@ struct ResultView: View {
                     .font(.system(size: 13))
                     .padding(.top, 2)
                     .padding(.leading, 5)
+                } else if let error = model.sourceError {
+                    Text(error)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.red)
+                        .padding(.top, 2)
+                        .padding(.leading, 5)
                 }
             }
             HStack(spacing: 4) {
@@ -75,33 +94,42 @@ struct ResultView: View {
         .cardBackground()
     }
 
-    // MARK: - 译文
+    private static func displayName(_ language: Locale.Language) -> String {
+        Locale.current.localizedString(forIdentifier: language.maximalIdentifier)
+            ?? language.minimalIdentifier
+    }
+}
 
-    private var resultCard: some View {
+/// 单个翻译服务的结果卡片
+private struct ServiceCard: View {
+    let symbol: String
+    let title: String
+    let result: TranslatorModel.ServiceResult
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Image(systemName: "apple.logo")
+                Image(systemName: symbol)
                     .font(.system(size: 12))
-                Text("系统翻译")
+                Text(title)
                     .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
                 Spacer()
-                if model.phase == .translating {
+                if result.phase == .loading {
                     ProgressView().controlSize(.small)
-                } else if model.phase == .done {
-                    IconButton(symbol: "doc.on.doc", help: "复制译文") { copy(model.resultText) }
+                } else if result.phase == .done {
+                    IconButton(symbol: "doc.on.doc", help: "复制译文") { copy(result.text) }
                 }
             }
             .foregroundStyle(.secondary)
 
             ScrollView {
                 Group {
-                    switch model.phase {
-                    case .failed(let message):
+                    if case .failed(let message) = result.phase {
                         Text(message).foregroundStyle(.red)
-                    case .done:
-                        Text(model.resultText).textSelection(.enabled)
-                    default:
-                        Text(" ")
+                    } else {
+                        // 流式输出时边收边显示
+                        Text(result.text.isEmpty ? " " : result.text).textSelection(.enabled)
                     }
                 }
                 .font(.system(size: 14))
@@ -113,16 +141,11 @@ struct ResultView: View {
         .frame(maxHeight: .infinity, alignment: .top)
         .cardBackground()
     }
+}
 
-    private func copy(_ text: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-    }
-
-    private static func displayName(_ language: Locale.Language) -> String {
-        Locale.current.localizedString(forIdentifier: language.maximalIdentifier)
-            ?? language.minimalIdentifier
-    }
+private func copy(_ text: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
 }
 
 private struct IconButton: View {

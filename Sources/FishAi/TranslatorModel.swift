@@ -25,68 +25,110 @@ struct TargetLanguage: Identifiable, Hashable {
 @MainActor
 final class TranslatorModel: ObservableObject {
     enum Phase: Equatable {
-        case idle, recognizing, translating, done, failed(String)
+        case idle, loading, done, failed(String)
     }
 
+    /// 单个翻译服务的结果
+    struct ServiceResult: Equatable {
+        var phase: Phase = .idle
+        var text = ""
+    }
+
+    let settings = AppSettings.shared
+
     @Published var sourceText = ""
-    @Published var resultText = ""
-    @Published var phase: Phase = .idle
+    @Published var isRecognizing = false
+    @Published var sourceError: String?
     @Published var detectedSource: Locale.Language?
     @Published var target: TargetLanguage = .auto {
         didSet { if oldValue != target { translate() } }
     }
-    /// 交给 SwiftUI `.translationTask` 使用；赋新值或 invalidate() 会触发一次翻译
+    @Published var system = ServiceResult()
+    @Published var openAI = ServiceResult()
+    /// 交给 SwiftUI `.translationTask` 使用；赋新值或 invalidate() 会触发一次系统翻译
     @Published var configuration: TranslationSession.Configuration?
 
+    private var openAITask: Task<Void, Never>?
+
     func beginRecognizing() {
+        openAITask?.cancel()
         sourceText = ""
-        resultText = ""
+        sourceError = nil
         detectedSource = nil
-        phase = .recognizing
+        system = ServiceResult()
+        openAI = ServiceResult()
+        isRecognizing = true
     }
 
     func setSource(_ text: String) {
+        isRecognizing = false
         sourceText = text
         translate()
     }
 
     func fail(_ message: String) {
-        phase = .failed(message)
+        isRecognizing = false
+        sourceError = message
     }
 
     func translate() {
+        openAITask?.cancel()
+        system = ServiceResult()
+        openAI = ServiceResult()
+
         let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
-            phase = .failed("未识别到文字")
+            sourceError = "未识别到文字"
             return
         }
+        sourceError = nil
         let source = Self.detectLanguage(text)
         detectedSource = source
         let targetLanguage = resolvedTarget(for: source)
 
-        let newConfig = TranslationSession.Configuration(source: source, target: targetLanguage)
-        if configuration?.source == newConfig.source, configuration?.target == newConfig.target {
-            configuration?.invalidate()
-        } else {
-            configuration = newConfig
+        if settings.systemEnabled {
+            system.phase = .loading
+            let newConfig = TranslationSession.Configuration(source: source, target: targetLanguage)
+            if configuration?.source == newConfig.source, configuration?.target == newConfig.target {
+                configuration?.invalidate()
+            } else {
+                configuration = newConfig
+            }
         }
-        phase = .translating
-        NSLog("[FishAi] translate %@ -> %@", source?.minimalIdentifier ?? "auto", targetLanguage.minimalIdentifier)
+
+        if settings.openAIEnabled {
+            openAI.phase = .loading
+            let from = source.map(Self.englishName) ?? "the detected language"
+            let to = Self.englishName(targetLanguage)
+            let config = settings.openAIConfig
+            openAITask = Task { await runOpenAI(text, from: from, to: to, config: config) }
+        }
     }
 
+    /// 由 `.translationTask` 回调
     func run(_ session: TranslationSession) async {
+        guard system.phase == .loading else { return }
         let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        NSLog("[FishAi] session ready")
         do {
             let response = try await session.translate(text)
-            resultText = response.targetText
+            system = ServiceResult(phase: .done, text: response.targetText)
             detectedSource = response.sourceLanguage
-            phase = .done
-            NSLog("[FishAi] %@ -> %@", text, response.targetText)
         } catch {
-            NSLog("[FishAi] translate failed: %@", String(describing: error))
-            phase = .failed("翻译失败：\(error.localizedDescription)")
+            system.phase = .failed("翻译失败：\(error.localizedDescription)")
+        }
+    }
+
+    private func runOpenAI(_ text: String, from: String, to: String, config: OpenAIClient.Config) async {
+        do {
+            try await OpenAIClient.translate(text, from: from, to: to, config: config) { [weak self] delta in
+                guard let self, !Task.isCancelled else { return }
+                self.openAI.text += delta
+            }
+            guard !Task.isCancelled else { return }
+            openAI.phase = .done
+        } catch {
+            guard !Task.isCancelled else { return }
+            openAI.phase = .failed("请求失败：\(error.localizedDescription)")
         }
     }
 
@@ -94,6 +136,13 @@ final class TranslatorModel: ObservableObject {
         if target != .auto { return target.language }
         if source?.languageCode == .chinese { return Locale.Language(identifier: "en") }
         return Locale.Language(identifier: "zh-Hans")
+    }
+
+    /// 提示词里使用的英文语言名，如 "Chinese, Simplified"
+    static func englishName(_ language: Locale.Language) -> String {
+        var id = language.languageCode?.identifier ?? language.minimalIdentifier
+        if let script = language.script, language.languageCode == .chinese { id += "-\(script.identifier)" }
+        return Locale(identifier: "en").localizedString(forIdentifier: id) ?? id
     }
 
     private static func detectLanguage(_ text: String) -> Locale.Language? {
