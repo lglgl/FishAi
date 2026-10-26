@@ -1,7 +1,7 @@
 import Foundation
 import Security
 
-/// 用户设置：开关与快捷键存 UserDefaults，模型配置存 SQLite，API Key 存钥匙串
+/// 用户设置：开关、快捷键与当前选择存 UserDefaults，模型与提示词存 SQLite，API Key 存钥匙串
 @MainActor
 final class AppSettings: ObservableObject {
     static let shared = AppSettings()
@@ -15,10 +15,26 @@ final class AppSettings: ObservableObject {
         """
     static let defaultUserPrompt = "{text}"
 
+    /// 首次使用时预置的提示词
+    static let builtinPrompts: [PromptTemplate] = [
+        PromptTemplate(id: 0, name: "翻译", systemPrompt: defaultSystemPrompt, userPrompt: defaultUserPrompt),
+        PromptTemplate(id: 0, name: "解释", systemPrompt: """
+            You are a helpful language assistant. Explain the user's text in {to}: its meaning, \
+            key words and phrases, and any cultural or contextual notes. Be concise.
+            """, userPrompt: defaultUserPrompt),
+        PromptTemplate(id: 0, name: "润色", systemPrompt: """
+            You are a professional editor. Polish the user's text in its original language to make it \
+            clearer and more natural. Output only the revised text.
+            """, userPrompt: defaultUserPrompt),
+    ]
+
     private enum Key {
         static let systemEnabled = "systemEnabled"
         static let openAIEnabled = "openAIEnabled"
         static let historyEnabled = "historyEnabled"
+        static let selectedModelID = "selectedModelID"
+        static let selectedPromptID = "selectedPromptID"
+        static let builtinPromptsSeeded = "builtinPromptsSeeded"
         static let screenshotShortcut = "screenshotShortcut"
         static let clipboardShortcut = "clipboardShortcut"
         static let selectionShortcut = "selectionShortcut"
@@ -50,17 +66,18 @@ final class AppSettings: ObservableObject {
     /// 注册失败（被占用）的快捷键
     @Published var shortcutConflicts: Set<ShortcutAction> = []
 
-    /// 全部模型配置，至少保留一组
-    @Published private(set) var configs: [ModelConfig] = []
-    @Published var activeConfigID: Int64? {
-        didSet {
-            guard let activeConfigID, activeConfigID != oldValue else { return }
-            db.setActiveConfig(id: activeConfigID)
-            activeAPIKey = Keychain.get(account: Self.apiKeyAccount(activeConfigID)) ?? ""
-        }
+    /// 全部模型与提示词，各至少保留一个
+    @Published private(set) var models: [LLMModel] = []
+    @Published private(set) var prompts: [PromptTemplate] = []
+    /// 翻译面板当前选择的模型与提示词
+    @Published var selectedModelID: Int64? {
+        didSet { defaults.set(selectedModelID.map(NSNumber.init(value:)), forKey: Key.selectedModelID) }
     }
-    /// 当前配置的 API Key（缓存，避免界面刷新时反复读钥匙串）
-    @Published private(set) var activeAPIKey = ""
+    @Published var selectedPromptID: Int64? {
+        didSet { defaults.set(selectedPromptID.map(NSNumber.init(value:)), forKey: Key.selectedPromptID) }
+    }
+    /// API Key 缓存，避免界面刷新时反复读钥匙串
+    private var apiKeyCache: [Int64: String] = [:]
 
     private init() {
         defaults.register(defaults: [
@@ -76,89 +93,125 @@ final class AppSettings: ObservableObject {
         selectionShortcut = Self.load(Key.selectionShortcut, default: .selectionDefault)
 
         migrateLegacyConfigIfNeeded()
-        configs = db.fetchConfigs()
-        let active = db.activeConfigID() ?? configs.first?.id
-        activeConfigID = active
-        if let active {
-            db.setActiveConfig(id: active)
-            activeAPIKey = Keychain.get(account: Self.apiKeyAccount(active)) ?? ""
+        // 预置提示词只补一次，用户删掉后不再出现
+        if !defaults.bool(forKey: Key.builtinPromptsSeeded) {
+            let existing = Set(db.fetchPrompts().map(\.name))
+            Self.builtinPrompts.filter { !existing.contains($0.name) }.forEach { db.insertPrompt($0) }
+            defaults.set(true, forKey: Key.builtinPromptsSeeded)
         }
+        models = db.fetchModels()
+        prompts = db.fetchPrompts()
+        selectedModelID = Self.validID(defaults.object(forKey: Key.selectedModelID), in: models.map(\.id))
+        selectedPromptID = Self.validID(defaults.object(forKey: Key.selectedPromptID), in: prompts.map(\.id))
     }
 
-    // MARK: - 模型配置
-
-    var activeConfig: ModelConfig? {
-        configs.first { $0.id == activeConfigID }
+    private static func validID(_ stored: Any?, in ids: [Int64]) -> Int64? {
+        if let id = (stored as? NSNumber)?.int64Value, ids.contains(id) { return id }
+        return ids.first
     }
 
+    // MARK: - 模型
+
+    var selectedModel: LLMModel? { models.first { $0.id == selectedModelID } }
+    var selectedPrompt: PromptTemplate? { prompts.first { $0.id == selectedPromptID } }
+
+    /// 当前选择组合成的请求配置
     var openAIConfig: OpenAIClient.Config {
-        let config = activeConfig
-        return OpenAIClient.Config(
-            baseURL: config?.baseURL ?? Self.defaultBaseURL, apiKey: activeAPIKey,
-            model: config?.model ?? Self.defaultModel,
-            systemPrompt: config?.systemPrompt ?? Self.defaultSystemPrompt,
-            userPrompt: config?.userPrompt ?? Self.defaultUserPrompt)
+        config(model: selectedModel, prompt: selectedPrompt)
     }
 
-    func updateActiveConfig(_ change: (inout ModelConfig) -> Void) {
-        guard let index = configs.firstIndex(where: { $0.id == activeConfigID }) else { return }
-        change(&configs[index])
-        db.updateConfig(configs[index])
+    func config(model: LLMModel?, prompt: PromptTemplate?) -> OpenAIClient.Config {
+        OpenAIClient.Config(
+            baseURL: model?.baseURL ?? Self.defaultBaseURL,
+            apiKey: model.map { apiKey(for: $0.id) } ?? "",
+            model: model?.model ?? Self.defaultModel,
+            systemPrompt: prompt?.systemPrompt ?? Self.defaultSystemPrompt,
+            userPrompt: prompt?.userPrompt ?? Self.defaultUserPrompt)
     }
 
-    func setActiveAPIKey(_ key: String) {
-        guard let activeConfigID else { return }
-        activeAPIKey = key
-        Keychain.set(key, account: Self.apiKeyAccount(activeConfigID))
+    @discardableResult
+    func addModel(copying base: LLMModel? = nil) -> Int64 {
+        var model = base ?? LLMModel(id: 0, name: "", baseURL: Self.defaultBaseURL, model: Self.defaultModel)
+        model.name = base.map { "\($0.name) 副本" } ?? "新模型 \(models.count + 1)"
+        model.id = db.insertModel(model)
+        if let base { setAPIKey(apiKey(for: base.id), for: model.id) }
+        models.append(model)
+        return model.id
     }
 
-    /// 新建配置；传入 base 时复制其内容和 API Key
-    func addConfig(copying base: ModelConfig? = nil) {
-        var config = base ?? ModelConfig(id: 0, name: "", baseURL: Self.defaultBaseURL, model: Self.defaultModel,
-                                         systemPrompt: Self.defaultSystemPrompt, userPrompt: Self.defaultUserPrompt)
-        config.name = base.map { "\($0.name) 副本" } ?? "新配置 \(configs.count + 1)"
-        config.id = db.insertConfig(config)
-        if let base, let key = Keychain.get(account: Self.apiKeyAccount(base.id)) {
-            Keychain.set(key, account: Self.apiKeyAccount(config.id))
-        }
-        configs.append(config)
-        activeConfigID = config.id
+    func updateModel(_ model: LLMModel) {
+        guard let index = models.firstIndex(where: { $0.id == model.id }), models[index] != model else { return }
+        models[index] = model
+        db.updateModel(model)
     }
 
-    func deleteActiveConfig() {
-        guard configs.count > 1, let id = activeConfigID else { return }
-        db.deleteConfig(id: id)
-        Keychain.set("", account: Self.apiKeyAccount(id))
-        configs.removeAll { $0.id == id }
-        activeConfigID = configs.first?.id
+    func deleteModel(id: Int64) {
+        guard models.count > 1 else { return }
+        db.deleteModel(id: id)
+        setAPIKey("", for: id)
+        models.removeAll { $0.id == id }
+        if selectedModelID == id { selectedModelID = models.first?.id }
     }
 
-    func resetPrompts() {
-        updateActiveConfig {
-            $0.systemPrompt = Self.defaultSystemPrompt
-            $0.userPrompt = Self.defaultUserPrompt
-        }
+    func apiKey(for id: Int64) -> String {
+        if let cached = apiKeyCache[id] { return cached }
+        let key = Keychain.get(account: Self.apiKeyAccount(id)) ?? ""
+        apiKeyCache[id] = key
+        return key
+    }
+
+    func setAPIKey(_ key: String, for id: Int64) {
+        guard apiKey(for: id) != key else { return }
+        apiKeyCache[id] = key
+        Keychain.set(key, account: Self.apiKeyAccount(id))
+        objectWillChange.send()
+    }
+
+    // MARK: - 提示词
+
+    @discardableResult
+    func addPrompt(copying base: PromptTemplate? = nil) -> Int64 {
+        var prompt = base ?? PromptTemplate(id: 0, name: "", systemPrompt: Self.defaultSystemPrompt,
+                                            userPrompt: Self.defaultUserPrompt)
+        prompt.name = base.map { "\($0.name) 副本" } ?? "新提示词 \(prompts.count + 1)"
+        prompt.id = db.insertPrompt(prompt)
+        prompts.append(prompt)
+        return prompt.id
+    }
+
+    func updatePrompt(_ prompt: PromptTemplate) {
+        guard let index = prompts.firstIndex(where: { $0.id == prompt.id }), prompts[index] != prompt else { return }
+        prompts[index] = prompt
+        db.updatePrompt(prompt)
+    }
+
+    func deletePrompt(id: Int64) {
+        guard prompts.count > 1 else { return }
+        db.deletePrompt(id: id)
+        prompts.removeAll { $0.id == id }
+        if selectedPromptID == id { selectedPromptID = prompts.first?.id }
     }
 
     private static func apiKeyAccount(_ id: Int64) -> String { "openai-api-key-\(id)" }
 
     /// 每步都可重复执行，中途被打断（如等待钥匙串授权时退出）下次启动会继续
     private func migrateLegacyConfigIfNeeded() {
-        if db.fetchConfigs().isEmpty {
-            let config = ModelConfig(
+        if db.fetchModels().isEmpty {
+            db.insertModel(LLMModel(
                 id: 0, name: "默认",
                 baseURL: defaults.string(forKey: Key.legacyBaseURL) ?? Self.defaultBaseURL,
-                model: defaults.string(forKey: Key.legacyModel) ?? Self.defaultModel,
-                systemPrompt: defaults.string(forKey: Key.legacySystemPrompt) ?? Self.defaultSystemPrompt,
-                userPrompt: defaults.string(forKey: Key.legacyUserPrompt) ?? Self.defaultUserPrompt)
-            db.setActiveConfig(id: db.insertConfig(config))
+                model: defaults.string(forKey: Key.legacyModel) ?? Self.defaultModel))
+            if db.fetchPrompts().isEmpty, let system = defaults.string(forKey: Key.legacySystemPrompt) {
+                db.insertPrompt(PromptTemplate(
+                    id: 0, name: "翻译", systemPrompt: system,
+                    userPrompt: defaults.string(forKey: Key.legacyUserPrompt) ?? Self.defaultUserPrompt))
+            }
         }
         for key in [Key.legacyBaseURL, Key.legacyModel, Key.legacySystemPrompt, Key.legacyUserPrompt] {
             defaults.removeObject(forKey: key)
         }
-        // 旧 API Key 归到当前配置（该配置还没有 Key 时）
-        if let key = Keychain.get(account: Key.legacyAPIKeyAccount),
-           let id = db.activeConfigID() ?? db.fetchConfigs().first?.id {
+        // 旧 API Key 归到第一个模型（该模型还没有 Key 时）
+        if let key = Keychain.get(account: Key.legacyAPIKeyAccount), let id = db.fetchModels().first?.id {
             if Keychain.get(account: Self.apiKeyAccount(id)) == nil {
                 Keychain.set(key, account: Self.apiKeyAccount(id))
             }

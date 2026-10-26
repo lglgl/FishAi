@@ -21,7 +21,6 @@ open build/FishAi.app
 - 划词翻译：全局快捷键 `⌥D`，翻译前台应用中选中的文字（需在「隐私与安全性 → 辅助功能」中授权 FishAi）
 - 剪贴板翻译：全局快捷键 `⌥V`，翻译剪贴板中的文字；剪贴板是图片时先识别文字
 - 首次截图需要在「隐私与安全性 → 屏幕录制」中授权 FishAi
-- 结果面板：可编辑原文后 `⌘↩` 重新翻译，`Esc` 关闭
 - 设置：菜单栏图标 → 设置…（`⌘,`）
 - 调试：`build/FishAi.app/Contents/MacOS/FishAi --image <图片路径>` 跳过截图直接识别翻译；`--clipboard` 启动后立即执行剪贴板翻译
 
@@ -54,15 +53,18 @@ rm fishai.key fishai.p12
 
 ## 设置
 
-| 项目 | 说明 |
+| 页面 | 说明 |
 |---|---|
-| 快捷键 | 截图翻译、划词翻译、剪贴板翻译的全局快捷键，点击后按下组合键录制（需包含 ⌘、⌥ 或 ⌃），可清除或恢复默认；被其他应用占用时显示警告 |
-| 翻译服务 | 分别开关「系统翻译」和「OpenAI 兼容接口」，结果面板为每个启用的服务显示一张卡片 |
-| 模型配置 | 可保存多组 OpenAI 兼容配置（如 OpenAI、DeepSeek、本地 Ollama），新建 / 复制 / 删除并切换当前配置 |
-| Base URL | 如 `https://api.openai.com/v1`，也可填完整的 `.../chat/completions` |
-| API Key | 每组配置单独保存在系统钥匙串，不写入数据库；本地服务（如 Ollama）可留空 |
-| 模型 | 如 `gpt-4o-mini`、`deepseek-chat` |
-| 提示词 | 系统提示词与用户提示词，变量：`{from}` 源语言、`{to}` 目标语言、`{text}` 原文 |
+| 通用 | 截图 / 划词 / 剪贴板翻译快捷键（点击录制，需包含 ⌘、⌥ 或 ⌃，可清除或恢复默认，被占用时警告）；系统翻译与大模型开关；是否保存翻译记录 |
+| 模型 | 管理多个 OpenAI 兼容模型：名称、Base URL（`.../v1` 或完整 `.../chat/completions`）、API Key（存钥匙串）、模型名，可新建 / 复制 / 删除 / 测试连接 |
+| 提示词 | 管理多组提示词：名称、系统提示词、用户提示词，变量 `{from}` 源语言、`{to}` 目标语言、`{text}` 原文。预置「翻译」「解释」「润色」 |
+| 翻译记录 | 搜索、复制、删除、清空 |
+
+## 翻译面板
+
+- 中间两个下拉框选择大模型和提示词，切换后立即用新组合重新请求，可用于翻译、解释、润色或自定义问答
+- 右上角图钉：未固定时点击其他应用即关闭面板；固定后面板常驻，新的翻译也不会移动位置
+- 可编辑原文后 `⌘↩` 重新翻译，`Esc` 关闭
 
 ## 本地存储
 
@@ -70,7 +72,8 @@ rm fishai.key fishai.p12
 
 | 表 | 内容 |
 |---|---|
-| `model_configs` | 名称、Base URL、模型、系统 / 用户提示词、是否为当前配置 |
+| `models` | 模型名称、Base URL、模型名 |
+| `prompts` | 提示词名称、系统提示词、用户提示词 |
 | `translations` | 时间、来源（截图 / 划词 / 剪贴板）、原文、源语言、目标语言、翻译服务、模型、译文 |
 
 设置 →「翻译记录」可搜索、复制、删除和清空记录；「通用」里可关闭记录保存。旧版保存在 UserDefaults 中的配置会在首次启动时自动迁移。
@@ -86,6 +89,6 @@ rm fishai.key fishai.p12
 | `SelectionReader.swift` | 读取选中文字（辅助功能接口，失败时模拟 ⌘C 并还原剪贴板） |
 | `TranslatorModel.swift` | 语言检测、目标语言、调度各翻译服务 |
 | `OpenAIClient.swift` | OpenAI 兼容接口（流式 / 非流式） |
-| `AppSettings.swift` / `SettingsView.swift` | 设置（UserDefaults + SQLite + 钥匙串）与设置窗口（通用 / 模型 / 翻译记录） |
-| `Database.swift` / `HistoryStore.swift` | SQLite 存储（模型配置、翻译记录） |
+| `AppSettings.swift` / `SettingsView.swift` | 设置（UserDefaults + SQLite + 钥匙串）与设置窗口（通用 / 模型 / 提示词 / 翻译记录） |
+| `Database.swift` / `HistoryStore.swift` | SQLite 存储（模型、提示词、翻译记录，带版本迁移） |
 | `ResultPanel.swift` / `ResultView.swift` | 毛玻璃浮动面板与 Bob 风格 SwiftUI 界面 |

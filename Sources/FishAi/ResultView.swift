@@ -10,11 +10,14 @@ struct ResultView: View {
         VStack(spacing: 10) {
             sourceCard
             languageBar
+            if settings.openAIEnabled {
+                llmBar
+            }
             if settings.systemEnabled {
                 ServiceCard(symbol: "apple.logo", title: "系统翻译", result: model.system)
             }
             if settings.openAIEnabled {
-                ServiceCard(symbol: "sparkles", title: settings.activeConfig?.name ?? "OpenAI", result: model.openAI)
+                ServiceCard(symbol: "sparkles", title: llmTitle, result: model.openAI)
             }
             if !settings.systemEnabled && !settings.openAIEnabled {
                 Text("请在设置中启用至少一个翻译服务")
@@ -69,6 +72,35 @@ struct ResultView: View {
         }
         .padding(8)
         .cardBackground()
+    }
+
+    // MARK: - 模型与提示词
+
+    private var llmBar: some View {
+        HStack(spacing: 8) {
+            Picker(selection: $settings.selectedModelID) {
+                ForEach(settings.models) { Text($0.name.isEmpty ? "未命名" : $0.name).tag(Optional($0.id)) }
+            } label: {
+                Image(systemName: "cpu").help("模型")
+            }
+            Picker(selection: $settings.selectedPromptID) {
+                ForEach(settings.prompts) { Text($0.name.isEmpty ? "未命名" : $0.name).tag(Optional($0.id)) }
+            } label: {
+                Image(systemName: "text.bubble").help("提示词")
+            }
+        }
+        .pickerStyle(.menu)
+        .font(.system(size: 12))
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .cardBackground()
+        .onChange(of: settings.selectedModelID) { model.rerunOpenAI() }
+        .onChange(of: settings.selectedPromptID) { model.rerunOpenAI() }
+    }
+
+    private var llmTitle: String {
+        [settings.selectedModel?.name, settings.selectedPrompt?.name]
+            .compactMap { $0 }.joined(separator: " · ")
     }
 
     // MARK: - 语言栏

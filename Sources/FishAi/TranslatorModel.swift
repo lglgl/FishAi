@@ -103,13 +103,25 @@ final class TranslatorModel: ObservableObject {
             }
         }
 
-        if settings.openAIEnabled {
-            openAI.phase = .loading
-            let from = source.map(Self.englishName) ?? "the detected language"
-            let to = Self.englishName(targetLanguage)
-            let config = settings.openAIConfig
-            openAITask = Task { await runOpenAI(text, from: from, to: to, config: config) }
-        }
+        if settings.openAIEnabled { startOpenAI(text) }
+    }
+
+    /// 切换模型或提示词后，只重新请求大模型这一张卡片
+    func rerunOpenAI() {
+        let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard settings.openAIEnabled, !text.isEmpty, !isRecognizing else { return }
+        startOpenAI(text)
+    }
+
+    private func startOpenAI(_ text: String) {
+        openAITask?.cancel()
+        openAI = ServiceResult(phase: .loading)
+        let from = detectedSource.map(Self.englishName) ?? "the detected language"
+        let to = Self.englishName(currentTarget)
+        let config = settings.openAIConfig
+        let label = [settings.selectedModel?.name, settings.selectedPrompt?.name]
+            .compactMap { $0 }.joined(separator: " · ")
+        openAITask = Task { await runOpenAI(text, from: from, to: to, config: config, label: label) }
     }
 
     /// 由 `.translationTask` 回调
@@ -126,8 +138,8 @@ final class TranslatorModel: ObservableObject {
         }
     }
 
-    private func runOpenAI(_ text: String, from: String, to: String, config: OpenAIClient.Config) async {
-        let modelLabel = [settings.activeConfig?.name, config.model].compactMap { $0 }.joined(separator: " · ")
+    private func runOpenAI(_ text: String, from: String, to: String, config: OpenAIClient.Config,
+                           label: String) async {
         do {
             try await OpenAIClient.translate(text, from: from, to: to, config: config) { [weak self] delta in
                 guard let self, !Task.isCancelled else { return }
@@ -135,7 +147,7 @@ final class TranslatorModel: ObservableObject {
             }
             guard !Task.isCancelled else { return }
             openAI.phase = .done
-            record(text, service: "openai", model: modelLabel, result: openAI.text)
+            record(text, service: "openai", model: label, result: openAI.text)
         } catch {
             guard !Task.isCancelled else { return }
             openAI.phase = .failed("请求失败：\(error.localizedDescription)")

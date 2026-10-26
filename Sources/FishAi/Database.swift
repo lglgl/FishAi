@@ -3,12 +3,18 @@ import SQLite3
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-/// OpenAI 兼容接口的一组配置；API Key 不入库，按 id 存在钥匙串
-struct ModelConfig: Identifiable, Equatable {
+/// 一个 OpenAI 兼容的大模型接口；API Key 不入库，按 id 存在钥匙串
+struct LLMModel: Identifiable, Equatable {
     var id: Int64
     var name: String
     var baseURL: String
     var model: String
+}
+
+/// 一组提示词，变量：{from} 源语言、{to} 目标语言、{text} 原文
+struct PromptTemplate: Identifiable, Equatable {
+    var id: Int64
+    var name: String
     var systemPrompt: String
     var userPrompt: String
 }
@@ -27,7 +33,7 @@ struct TranslationRecord: Identifiable, Equatable {
     var targetLang: String
     /// "system" 或 "openai"
     var service: String
-    /// OpenAI 兼容接口使用的配置名与模型，如 "默认 · gpt-4o-mini"
+    /// OpenAI 兼容接口使用的模型与提示词，如 "GPT-4o mini · 翻译"
     var model: String?
     var resultText: String
 }
@@ -67,7 +73,12 @@ final class Database {
 
     private func migrate() throws {
         try execute("PRAGMA journal_mode = WAL")
-        guard try query("PRAGMA user_version", row: { $0.int(0) }).first ?? 0 < 1 else { return }
+        let version = try query("PRAGMA user_version", row: { $0.int(0) }).first ?? 0
+        if version < 1 { try migrateToV1() }
+        if version < 2 { try migrateToV2() }
+    }
+
+    private func migrateToV1() throws {
         try execute("""
             CREATE TABLE IF NOT EXISTS model_configs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,48 +109,104 @@ final class Database {
         try execute("PRAGMA user_version = 1")
     }
 
-    // MARK: - 模型配置
+    /// v2：模型与提示词拆成两张表，可自由组合。保留原 id，钥匙串里的 API Key 仍能对上
+    private func migrateToV2() throws {
+        try execute("BEGIN")
+        do {
+            try execute("""
+                CREATE TABLE models (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    base_url TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """)
+            try execute("""
+                CREATE TABLE prompts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    system_prompt TEXT NOT NULL,
+                    user_prompt TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """)
+            try execute("""
+                INSERT INTO models (id, name, base_url, model, created_at, updated_at)
+                SELECT id, name, base_url, model, created_at, updated_at FROM model_configs ORDER BY id
+                """)
+            let oldPrompts = try query("SELECT system_prompt, user_prompt FROM model_configs ORDER BY id") {
+                [$0.text(0), $0.text(1)]
+            }
+            var seen: [[String]] = []
+            for prompt in oldPrompts where !seen.contains(prompt) {
+                seen.append(prompt)
+                insertPrompt(PromptTemplate(id: 0, name: seen.count == 1 ? "翻译" : "翻译 \(seen.count)",
+                                            systemPrompt: prompt[0], userPrompt: prompt[1]))
+            }
+            try execute("DROP TABLE model_configs")
+            try execute("PRAGMA user_version = 2")
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
 
-    func fetchConfigs() -> [ModelConfig] {
-        (try? query("""
-            SELECT id, name, base_url, model, system_prompt, user_prompt
-            FROM model_configs ORDER BY id
-            """) { row in
-            ModelConfig(id: row.int(0), name: row.text(1), baseURL: row.text(2), model: row.text(3),
-                        systemPrompt: row.text(4), userPrompt: row.text(5))
+    // MARK: - 模型
+
+    func fetchModels() -> [LLMModel] {
+        (try? query("SELECT id, name, base_url, model FROM models ORDER BY id") { row in
+            LLMModel(id: row.int(0), name: row.text(1), baseURL: row.text(2), model: row.text(3))
         }) ?? []
     }
 
-    func activeConfigID() -> Int64? {
-        (try? query("SELECT id FROM model_configs WHERE is_active = 1 LIMIT 1") { $0.int(0) })?.first
-    }
-
     @discardableResult
-    func insertConfig(_ config: ModelConfig) -> Int64 {
+    func insertModel(_ model: LLMModel) -> Int64 {
         let now = Date().timeIntervalSince1970
         try? execute("""
-            INSERT INTO model_configs (name, base_url, model, system_prompt, user_prompt, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, [.text(config.name), .text(config.baseURL), .text(config.model),
-                  .text(config.systemPrompt), .text(config.userPrompt), .real(now), .real(now)])
+            INSERT INTO models (name, base_url, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
+            """, [.text(model.name), .text(model.baseURL), .text(model.model), .real(now), .real(now)])
         return sqlite3_last_insert_rowid(db)
     }
 
-    func updateConfig(_ config: ModelConfig) {
+    func updateModel(_ model: LLMModel) {
+        try? execute("UPDATE models SET name = ?, base_url = ?, model = ?, updated_at = ? WHERE id = ?",
+                     [.text(model.name), .text(model.baseURL), .text(model.model),
+                      .real(Date().timeIntervalSince1970), .int(model.id)])
+    }
+
+    func deleteModel(id: Int64) {
+        try? execute("DELETE FROM models WHERE id = ?", [.int(id)])
+    }
+
+    // MARK: - 提示词
+
+    func fetchPrompts() -> [PromptTemplate] {
+        (try? query("SELECT id, name, system_prompt, user_prompt FROM prompts ORDER BY id") { row in
+            PromptTemplate(id: row.int(0), name: row.text(1), systemPrompt: row.text(2), userPrompt: row.text(3))
+        }) ?? []
+    }
+
+    @discardableResult
+    func insertPrompt(_ prompt: PromptTemplate) -> Int64 {
+        let now = Date().timeIntervalSince1970
         try? execute("""
-            UPDATE model_configs
-            SET name = ?, base_url = ?, model = ?, system_prompt = ?, user_prompt = ?, updated_at = ?
-            WHERE id = ?
-            """, [.text(config.name), .text(config.baseURL), .text(config.model), .text(config.systemPrompt),
-                  .text(config.userPrompt), .real(Date().timeIntervalSince1970), .int(config.id)])
+            INSERT INTO prompts (name, system_prompt, user_prompt, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
+            """, [.text(prompt.name), .text(prompt.systemPrompt), .text(prompt.userPrompt), .real(now), .real(now)])
+        return sqlite3_last_insert_rowid(db)
     }
 
-    func deleteConfig(id: Int64) {
-        try? execute("DELETE FROM model_configs WHERE id = ?", [.int(id)])
+    func updatePrompt(_ prompt: PromptTemplate) {
+        try? execute("UPDATE prompts SET name = ?, system_prompt = ?, user_prompt = ?, updated_at = ? WHERE id = ?",
+                     [.text(prompt.name), .text(prompt.systemPrompt), .text(prompt.userPrompt),
+                      .real(Date().timeIntervalSince1970), .int(prompt.id)])
     }
 
-    func setActiveConfig(id: Int64) {
-        try? execute("UPDATE model_configs SET is_active = (id = ?)", [.int(id)])
+    func deletePrompt(id: Int64) {
+        try? execute("DELETE FROM prompts WHERE id = ?", [.int(id)])
     }
 
     // MARK: - 翻译记录

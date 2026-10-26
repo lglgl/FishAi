@@ -10,10 +10,15 @@ final class ResultPanel: NSPanel {
     }
 }
 
+/// 未固定时，面板失去焦点（点击别处）即关闭；固定后常驻并保持位置
 @MainActor
-final class ResultPanelController {
+final class ResultPanelController: NSObject, NSWindowDelegate {
     let model = TranslatorModel()
     private lazy var panel: ResultPanel = makePanel()
+    private var pinButton: NSButton!
+    private var isPinned = false {
+        didSet { updatePinButton() }
+    }
 
     func show() {
         if !panel.isVisible { positionNearMouse() }
@@ -21,9 +26,43 @@ final class ResultPanelController {
         panel.makeKeyAndOrderFront(nil)
     }
 
+    func windowDidResignKey(_ notification: Notification) {
+        // 焦点切到本应用其他窗口（如设置）时不关闭，只在切到其他应用后关闭
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.isPinned, !self.panel.isKeyWindow, NSApp.keyWindow == nil else { return }
+            self.panel.orderOut(nil)
+        }
+    }
+
+    @objc private func togglePin() {
+        isPinned.toggle()
+    }
+
+    private func updatePinButton() {
+        let symbol = isPinned ? "pin.fill" : "pin"
+        pinButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: isPinned ? "取消固定" : "固定")?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
+        pinButton.contentTintColor = isPinned ? .controlAccentColor : .secondaryLabelColor
+        pinButton.toolTip = isPinned ? "取消固定（点击别处时关闭）" : "固定窗口（点击别处时不关闭）"
+    }
+
+    private func makePinAccessory() -> NSTitlebarAccessoryViewController {
+        pinButton = NSButton(image: NSImage(), target: self, action: #selector(togglePin))
+        pinButton.isBordered = false
+        pinButton.frame = NSRect(x: 0, y: 0, width: 28, height: 22)
+        updatePinButton()
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 36, height: 28))
+        pinButton.frame.origin = NSPoint(x: 2, y: 3)
+        container.addSubview(pinButton)
+        let accessory = NSTitlebarAccessoryViewController()
+        accessory.view = container
+        accessory.layoutAttribute = .trailing
+        return accessory
+    }
+
     private func makePanel() -> ResultPanel {
         let panel = ResultPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 460),
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 520),
             styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -36,6 +75,8 @@ final class ResultPanelController {
         panel.isReleasedWhenClosed = false
         panel.minSize = NSSize(width: 320, height: 300)
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        panel.delegate = self
+        panel.addTitlebarAccessoryViewController(makePinAccessory())
 
         // 毛玻璃背景
         let blur = NSVisualEffectView()
