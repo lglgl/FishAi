@@ -58,10 +58,22 @@ rm fishai.key fishai.p12
 |---|---|
 | 快捷键 | 截图翻译、划词翻译、剪贴板翻译的全局快捷键，点击后按下组合键录制（需包含 ⌘、⌥ 或 ⌃），可清除或恢复默认；被其他应用占用时显示警告 |
 | 翻译服务 | 分别开关「系统翻译」和「OpenAI 兼容接口」，结果面板为每个启用的服务显示一张卡片 |
+| 模型配置 | 可保存多组 OpenAI 兼容配置（如 OpenAI、DeepSeek、本地 Ollama），新建 / 复制 / 删除并切换当前配置 |
 | Base URL | 如 `https://api.openai.com/v1`，也可填完整的 `.../chat/completions` |
-| API Key | 保存在系统钥匙串；本地服务（如 Ollama）可留空 |
+| API Key | 每组配置单独保存在系统钥匙串，不写入数据库；本地服务（如 Ollama）可留空 |
 | 模型 | 如 `gpt-4o-mini`、`deepseek-chat` |
 | 提示词 | 系统提示词与用户提示词，变量：`{from}` 源语言、`{to}` 目标语言、`{text}` 原文 |
+
+## 本地存储
+
+模型配置与翻译记录保存在 SQLite 数据库 `~/Library/Application Support/FishAi/fishai.sqlite`：
+
+| 表 | 内容 |
+|---|---|
+| `model_configs` | 名称、Base URL、模型、系统 / 用户提示词、是否为当前配置 |
+| `translations` | 时间、来源（截图 / 划词 / 剪贴板）、原文、源语言、目标语言、翻译服务、模型、译文 |
+
+设置 →「翻译记录」可搜索、复制、删除和清空记录；「通用」里可关闭记录保存。旧版保存在 UserDefaults 中的配置会在首次启动时自动迁移。
 
 ## 结构
 
@@ -74,5 +86,6 @@ rm fishai.key fishai.p12
 | `SelectionReader.swift` | 读取选中文字（辅助功能接口，失败时模拟 ⌘C 并还原剪贴板） |
 | `TranslatorModel.swift` | 语言检测、目标语言、调度各翻译服务 |
 | `OpenAIClient.swift` | OpenAI 兼容接口（流式 / 非流式） |
-| `AppSettings.swift` / `SettingsView.swift` | 设置存储（UserDefaults + 钥匙串）与设置窗口 |
+| `AppSettings.swift` / `SettingsView.swift` | 设置（UserDefaults + SQLite + 钥匙串）与设置窗口（通用 / 模型 / 翻译记录） |
+| `Database.swift` / `HistoryStore.swift` | SQLite 存储（模型配置、翻译记录） |
 | `ResultPanel.swift` / `ResultView.swift` | 毛玻璃浮动面板与 Bob 风格 SwiftUI 界面 |

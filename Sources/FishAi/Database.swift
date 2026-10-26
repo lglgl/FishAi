@@ -1,0 +1,234 @@
+import Foundation
+import SQLite3
+
+private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+/// OpenAI 兼容接口的一组配置；API Key 不入库，按 id 存在钥匙串
+struct ModelConfig: Identifiable, Equatable {
+    var id: Int64
+    var name: String
+    var baseURL: String
+    var model: String
+    var systemPrompt: String
+    var userPrompt: String
+}
+
+/// 一条翻译记录
+struct TranslationRecord: Identifiable, Equatable {
+    enum Origin: String {
+        case screenshot, selection, clipboard, manual
+    }
+
+    var id: Int64 = 0
+    var createdAt = Date()
+    var origin: Origin
+    var sourceText: String
+    var sourceLang: String?
+    var targetLang: String
+    /// "system" 或 "openai"
+    var service: String
+    /// OpenAI 兼容接口使用的配置名与模型，如 "默认 · gpt-4o-mini"
+    var model: String?
+    var resultText: String
+}
+
+/// 基于系统 libsqlite3 的本地存储，位于 ~/Library/Application Support/FishAi/fishai.sqlite
+@MainActor
+final class Database {
+    static let shared = Database()
+
+    enum Value {
+        case int(Int64), text(String), real(Double), null
+    }
+
+    struct DBError: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    private var db: OpaquePointer?
+
+    nonisolated static var defaultURL: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("FishAi", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("fishai.sqlite")
+    }
+
+    /// 打开失败时退回内存数据库，保证应用可用
+    init(url: URL = Database.defaultURL) {
+        if sqlite3_open(url.path, &db) != SQLITE_OK {
+            NSLog("[FishAi] open database failed: %@", String(cString: sqlite3_errmsg(db)))
+            sqlite3_close(db)
+            sqlite3_open(":memory:", &db)
+        }
+        try? migrate()
+    }
+
+    private func migrate() throws {
+        try execute("PRAGMA journal_mode = WAL")
+        guard try query("PRAGMA user_version", row: { $0.int(0) }).first ?? 0 < 1 else { return }
+        try execute("""
+            CREATE TABLE IF NOT EXISTS model_configs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                model TEXT NOT NULL,
+                system_prompt TEXT NOT NULL,
+                user_prompt TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """)
+        try execute("""
+            CREATE TABLE IF NOT EXISTS translations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at REAL NOT NULL,
+                origin TEXT NOT NULL,
+                source_text TEXT NOT NULL,
+                source_lang TEXT,
+                target_lang TEXT NOT NULL,
+                service TEXT NOT NULL,
+                model TEXT,
+                result_text TEXT NOT NULL
+            )
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS idx_translations_created_at ON translations (created_at DESC)")
+        try execute("PRAGMA user_version = 1")
+    }
+
+    // MARK: - 模型配置
+
+    func fetchConfigs() -> [ModelConfig] {
+        (try? query("""
+            SELECT id, name, base_url, model, system_prompt, user_prompt
+            FROM model_configs ORDER BY id
+            """) { row in
+            ModelConfig(id: row.int(0), name: row.text(1), baseURL: row.text(2), model: row.text(3),
+                        systemPrompt: row.text(4), userPrompt: row.text(5))
+        }) ?? []
+    }
+
+    func activeConfigID() -> Int64? {
+        (try? query("SELECT id FROM model_configs WHERE is_active = 1 LIMIT 1") { $0.int(0) })?.first
+    }
+
+    @discardableResult
+    func insertConfig(_ config: ModelConfig) -> Int64 {
+        let now = Date().timeIntervalSince1970
+        try? execute("""
+            INSERT INTO model_configs (name, base_url, model, system_prompt, user_prompt, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, [.text(config.name), .text(config.baseURL), .text(config.model),
+                  .text(config.systemPrompt), .text(config.userPrompt), .real(now), .real(now)])
+        return sqlite3_last_insert_rowid(db)
+    }
+
+    func updateConfig(_ config: ModelConfig) {
+        try? execute("""
+            UPDATE model_configs
+            SET name = ?, base_url = ?, model = ?, system_prompt = ?, user_prompt = ?, updated_at = ?
+            WHERE id = ?
+            """, [.text(config.name), .text(config.baseURL), .text(config.model), .text(config.systemPrompt),
+                  .text(config.userPrompt), .real(Date().timeIntervalSince1970), .int(config.id)])
+    }
+
+    func deleteConfig(id: Int64) {
+        try? execute("DELETE FROM model_configs WHERE id = ?", [.int(id)])
+    }
+
+    func setActiveConfig(id: Int64) {
+        try? execute("UPDATE model_configs SET is_active = (id = ?)", [.int(id)])
+    }
+
+    // MARK: - 翻译记录
+
+    func insertRecord(_ record: TranslationRecord) {
+        try? execute("""
+            INSERT INTO translations
+                (created_at, origin, source_text, source_lang, target_lang, service, model, result_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, [.real(record.createdAt.timeIntervalSince1970), .text(record.origin.rawValue),
+                  .text(record.sourceText), record.sourceLang.map(Value.text) ?? .null,
+                  .text(record.targetLang), .text(record.service),
+                  record.model.map(Value.text) ?? .null, .text(record.resultText)])
+    }
+
+    /// 按原文或译文搜索，最新的在前
+    func fetchRecords(search: String = "", limit: Int = 500) -> [TranslationRecord] {
+        let pattern = "%\(search)%"
+        return (try? query("""
+            SELECT id, created_at, origin, source_text, source_lang, target_lang, service, model, result_text
+            FROM translations
+            WHERE ? = '' OR source_text LIKE ? OR result_text LIKE ?
+            ORDER BY created_at DESC LIMIT ?
+            """, [.text(search), .text(pattern), .text(pattern), .int(Int64(limit))]) { row in
+            TranslationRecord(
+                id: row.int(0), createdAt: Date(timeIntervalSince1970: row.double(1)),
+                origin: TranslationRecord.Origin(rawValue: row.text(2)) ?? .manual,
+                sourceText: row.text(3), sourceLang: row.optionalText(4), targetLang: row.text(5),
+                service: row.text(6), model: row.optionalText(7), resultText: row.text(8))
+        }) ?? []
+    }
+
+    func deleteRecord(id: Int64) {
+        try? execute("DELETE FROM translations WHERE id = ?", [.int(id)])
+    }
+
+    func clearRecords() {
+        try? execute("DELETE FROM translations")
+    }
+
+    // MARK: - 底层封装
+
+    struct Row {
+        fileprivate let stmt: OpaquePointer
+
+        func int(_ i: Int32) -> Int64 { sqlite3_column_int64(stmt, i) }
+        func double(_ i: Int32) -> Double { sqlite3_column_double(stmt, i) }
+        func text(_ i: Int32) -> String { optionalText(i) ?? "" }
+        func optionalText(_ i: Int32) -> String? {
+            sqlite3_column_text(stmt, i).map { String(cString: $0) }
+        }
+    }
+
+    func execute(_ sql: String, _ params: [Value] = []) throws {
+        let stmt = try prepare(sql, params)
+        defer { sqlite3_finalize(stmt) }
+        let rc = sqlite3_step(stmt)
+        guard rc == SQLITE_DONE || rc == SQLITE_ROW else { throw lastError() }
+    }
+
+    func query<T>(_ sql: String, _ params: [Value] = [], row map: (Row) -> T) throws -> [T] {
+        let stmt = try prepare(sql, params)
+        defer { sqlite3_finalize(stmt) }
+        var results: [T] = []
+        while true {
+            let rc = sqlite3_step(stmt)
+            if rc == SQLITE_DONE { break }
+            guard rc == SQLITE_ROW else { throw lastError() }
+            results.append(map(Row(stmt: stmt)))
+        }
+        return results
+    }
+
+    private func prepare(_ sql: String, _ params: [Value]) throws -> OpaquePointer {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else { throw lastError() }
+        for (i, value) in params.enumerated() {
+            let index = Int32(i + 1)
+            switch value {
+            case .int(let v): sqlite3_bind_int64(stmt, index, v)
+            case .real(let v): sqlite3_bind_double(stmt, index, v)
+            case .text(let v): sqlite3_bind_text(stmt, index, v, -1, SQLITE_TRANSIENT)
+            case .null: sqlite3_bind_null(stmt, index)
+            }
+        }
+        return stmt
+    }
+
+    private func lastError() -> DBError {
+        DBError(message: String(cString: sqlite3_errmsg(db)))
+    }
+}

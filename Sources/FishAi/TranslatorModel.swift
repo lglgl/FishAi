@@ -37,6 +37,8 @@ final class TranslatorModel: ObservableObject {
     let settings = AppSettings.shared
 
     @Published var sourceText = ""
+    /// 当前原文的来源，写入翻译记录
+    var origin: TranslationRecord.Origin = .manual
     @Published var isRecognizing = false
     @Published var sourceError: String?
     @Published var detectedSource: Locale.Language?
@@ -49,8 +51,11 @@ final class TranslatorModel: ObservableObject {
     @Published var configuration: TranslationSession.Configuration?
 
     private var openAITask: Task<Void, Never>?
+    /// 本次翻译实际使用的目标语言
+    private var currentTarget = Locale.Language(identifier: "zh-Hans")
 
-    func beginRecognizing() {
+    func beginRecognizing(origin: TranslationRecord.Origin) {
+        self.origin = origin
         openAITask?.cancel()
         sourceText = ""
         sourceError = nil
@@ -60,7 +65,8 @@ final class TranslatorModel: ObservableObject {
         isRecognizing = true
     }
 
-    func setSource(_ text: String) {
+    func setSource(_ text: String, origin: TranslationRecord.Origin) {
+        self.origin = origin
         isRecognizing = false
         sourceText = text
         translate()
@@ -85,6 +91,7 @@ final class TranslatorModel: ObservableObject {
         let source = Self.detectLanguage(text)
         detectedSource = source
         let targetLanguage = resolvedTarget(for: source)
+        currentTarget = targetLanguage
 
         if settings.systemEnabled {
             system.phase = .loading
@@ -113,12 +120,14 @@ final class TranslatorModel: ObservableObject {
             let response = try await session.translate(text)
             system = ServiceResult(phase: .done, text: response.targetText)
             detectedSource = response.sourceLanguage
+            record(text, service: "system", model: nil, result: response.targetText)
         } catch {
             system.phase = .failed("翻译失败：\(error.localizedDescription)")
         }
     }
 
     private func runOpenAI(_ text: String, from: String, to: String, config: OpenAIClient.Config) async {
+        let modelLabel = [settings.activeConfig?.name, config.model].compactMap { $0 }.joined(separator: " · ")
         do {
             try await OpenAIClient.translate(text, from: from, to: to, config: config) { [weak self] delta in
                 guard let self, !Task.isCancelled else { return }
@@ -126,10 +135,18 @@ final class TranslatorModel: ObservableObject {
             }
             guard !Task.isCancelled else { return }
             openAI.phase = .done
+            record(text, service: "openai", model: modelLabel, result: openAI.text)
         } catch {
             guard !Task.isCancelled else { return }
             openAI.phase = .failed("请求失败：\(error.localizedDescription)")
         }
+    }
+
+    private func record(_ text: String, service: String, model: String?, result: String) {
+        HistoryStore.shared.add(TranslationRecord(
+            origin: origin, sourceText: text, sourceLang: detectedSource?.minimalIdentifier,
+            targetLang: currentTarget.minimalIdentifier, service: service, model: model,
+            resultText: result.trimmingCharacters(in: .whitespacesAndNewlines)))
     }
 
     private func resolvedTarget(for source: Locale.Language?) -> Locale.Language {

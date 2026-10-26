@@ -14,7 +14,7 @@ struct ResultView: View {
                 ServiceCard(symbol: "apple.logo", title: "系统翻译", result: model.system)
             }
             if settings.openAIEnabled {
-                ServiceCard(symbol: "sparkles", title: settings.model, result: model.openAI)
+                ServiceCard(symbol: "sparkles", title: settings.activeConfig?.name ?? "OpenAI", result: model.openAI)
             }
             if !settings.systemEnabled && !settings.openAIEnabled {
                 Text("请在设置中启用至少一个翻译服务")

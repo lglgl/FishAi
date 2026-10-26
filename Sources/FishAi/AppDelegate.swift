@@ -32,7 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--image"), i + 1 < args.count,
            let image = NSImage(contentsOfFile: args[i + 1])?.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            Task { await recognizeAndTranslate(image) }
+            Task { await recognizeAndTranslate(image, origin: .screenshot) }
         } else if args.contains("--clipboard") {
             clipboardTranslate()
         }
@@ -124,7 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard ScreenCapture.ensurePermission() else { return }
         Task { @MainActor in
             guard let image = await ScreenCapture.captureInteractively() else { return }
-            await recognizeAndTranslate(image)
+            await recognizeAndTranslate(image, origin: .screenshot)
         }
     }
 
@@ -135,9 +135,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let text = await SelectionReader.selectedText()
             panel.show()
             if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                panel.model.setSource(text)
+                panel.model.setSource(text, origin: .selection)
             } else {
-                panel.model.beginRecognizing()
+                panel.model.beginRecognizing(origin: .selection)
                 panel.model.fail("未获取到选中的文字")
             }
         }
@@ -149,23 +149,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let text = pasteboard.string(forType: .string),
            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             panel.show()
-            panel.model.setSource(text)
+            panel.model.setSource(text, origin: .clipboard)
         } else if let image = (pasteboard.readObjects(forClasses: [NSImage.self]) as? [NSImage])?.first,
                   let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            Task { await recognizeAndTranslate(cgImage) }
+            Task { await recognizeAndTranslate(cgImage, origin: .clipboard) }
         } else {
             panel.show()
-            panel.model.beginRecognizing()
+            panel.model.beginRecognizing(origin: .clipboard)
             panel.model.fail("剪贴板中没有文字或图片")
         }
     }
 
-    private func recognizeAndTranslate(_ image: CGImage) async {
+    private func recognizeAndTranslate(_ image: CGImage, origin: TranslationRecord.Origin) async {
         panel.show()
-        panel.model.beginRecognizing()
+        panel.model.beginRecognizing(origin: origin)
         do {
             let text = try await TextRecognizer.recognize(image)
-            panel.model.setSource(text)
+            panel.model.setSource(text, origin: origin)
         } catch {
             panel.model.fail("文字识别失败：\(error.localizedDescription)")
         }
