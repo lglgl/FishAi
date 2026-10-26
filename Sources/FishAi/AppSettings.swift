@@ -29,12 +29,11 @@ final class AppSettings: ObservableObject {
     ]
 
     private enum Key {
-        static let systemEnabled = "systemEnabled"
-        static let openAIEnabled = "openAIEnabled"
         static let historyEnabled = "historyEnabled"
         static let selectedModelID = "selectedModelID"
         static let selectedPromptID = "selectedPromptID"
         static let builtinPromptsSeeded = "builtinPromptsSeeded"
+        static let systemModelDefaulted = "systemModelDefaulted"
         static let screenshotShortcut = "screenshotShortcut"
         static let clipboardShortcut = "clipboardShortcut"
         static let selectionShortcut = "selectionShortcut"
@@ -53,8 +52,6 @@ final class AppSettings: ObservableObject {
     private let defaults = UserDefaults.standard
     private let db = Database.shared
 
-    @Published var systemEnabled: Bool { didSet { defaults.set(systemEnabled, forKey: Key.systemEnabled) } }
-    @Published var openAIEnabled: Bool { didSet { defaults.set(openAIEnabled, forKey: Key.openAIEnabled) } }
     @Published var historyEnabled: Bool { didSet { defaults.set(historyEnabled, forKey: Key.historyEnabled) } }
     /// nil 表示未设置快捷键
     @Published var screenshotShortcut: Shortcut? { didSet { save(screenshotShortcut, forKey: Key.screenshotShortcut) } }
@@ -66,7 +63,7 @@ final class AppSettings: ObservableObject {
     /// 注册失败（被占用）的快捷键
     @Published var shortcutConflicts: Set<ShortcutAction> = []
 
-    /// 全部模型与提示词，各至少保留一个
+    /// 全部模型（第一个是内置的系统翻译）与提示词（至少保留一个）
     @Published private(set) var models: [LLMModel] = []
     @Published private(set) var prompts: [PromptTemplate] = []
     /// 翻译面板当前选择的模型与提示词
@@ -81,12 +78,8 @@ final class AppSettings: ObservableObject {
 
     private init() {
         defaults.register(defaults: [
-            Key.systemEnabled: true,
-            Key.openAIEnabled: false,
             Key.historyEnabled: true,
         ])
-        systemEnabled = defaults.bool(forKey: Key.systemEnabled)
-        openAIEnabled = defaults.bool(forKey: Key.openAIEnabled)
         historyEnabled = defaults.bool(forKey: Key.historyEnabled)
         screenshotShortcut = Self.load(Key.screenshotShortcut, default: .screenshotDefault)
         clipboardShortcut = Self.load(Key.clipboardShortcut, default: .clipboardDefault)
@@ -103,6 +96,11 @@ final class AppSettings: ObservableObject {
         prompts = db.fetchPrompts()
         selectedModelID = Self.validID(defaults.object(forKey: Key.selectedModelID), in: models.map(\.id))
         selectedPromptID = Self.validID(defaults.object(forKey: Key.selectedPromptID), in: prompts.map(\.id))
+        // 系统翻译成为默认模型（只切换一次，之后尊重用户的选择）
+        if !defaults.bool(forKey: Key.systemModelDefaulted) {
+            selectedModelID = models.first(where: \.isSystem)?.id ?? selectedModelID
+            defaults.set(true, forKey: Key.systemModelDefaulted)
+        }
     }
 
     private static func validID(_ stored: Any?, in ids: [Int64]) -> Int64? {
@@ -131,6 +129,7 @@ final class AppSettings: ObservableObject {
 
     @discardableResult
     func addModel(copying base: LLMModel? = nil) -> Int64 {
+        let base = base?.isSystem == true ? nil : base
         var model = base ?? LLMModel(id: 0, name: "", baseURL: Self.defaultBaseURL, model: Self.defaultModel)
         model.name = base.map { "\($0.name) 副本" } ?? "新模型 \(models.count + 1)"
         model.id = db.insertModel(model)
@@ -146,7 +145,7 @@ final class AppSettings: ObservableObject {
     }
 
     func deleteModel(id: Int64) {
-        guard models.count > 1 else { return }
+        guard models.contains(where: { $0.id == id && !$0.isSystem }) else { return }
         db.deleteModel(id: id)
         setAPIKey("", for: id)
         models.removeAll { $0.id == id }
@@ -196,7 +195,8 @@ final class AppSettings: ObservableObject {
 
     /// 每步都可重复执行，中途被打断（如等待钥匙串授权时退出）下次启动会继续
     private func migrateLegacyConfigIfNeeded() {
-        if db.fetchModels().isEmpty {
+        let hasLegacy = defaults.string(forKey: Key.legacyBaseURL) != nil || defaults.string(forKey: Key.legacyModel) != nil
+        if hasLegacy, !db.fetchModels().contains(where: { !$0.isSystem }) {
             db.insertModel(LLMModel(
                 id: 0, name: "默认",
                 baseURL: defaults.string(forKey: Key.legacyBaseURL) ?? Self.defaultBaseURL,
@@ -207,11 +207,14 @@ final class AppSettings: ObservableObject {
                     userPrompt: defaults.string(forKey: Key.legacyUserPrompt) ?? Self.defaultUserPrompt))
             }
         }
-        for key in [Key.legacyBaseURL, Key.legacyModel, Key.legacySystemPrompt, Key.legacyUserPrompt] {
+        // systemEnabled / openAIEnabled：v3 起由所选模型决定使用哪种翻译，不再需要开关
+        for key in [Key.legacyBaseURL, Key.legacyModel, Key.legacySystemPrompt, Key.legacyUserPrompt,
+                    "systemEnabled", "openAIEnabled"] {
             defaults.removeObject(forKey: key)
         }
-        // 旧 API Key 归到第一个模型（该模型还没有 Key 时）
-        if let key = Keychain.get(account: Key.legacyAPIKeyAccount), let id = db.fetchModels().first?.id {
+        // 旧 API Key 归到第一个大模型（该模型还没有 Key 时）
+        if let key = Keychain.get(account: Key.legacyAPIKeyAccount),
+           let id = db.fetchModels().first(where: { !$0.isSystem })?.id {
             if Keychain.get(account: Self.apiKeyAccount(id)) == nil {
                 Keychain.set(key, account: Self.apiKeyAccount(id))
             }

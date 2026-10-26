@@ -28,7 +28,7 @@ final class TranslatorModel: ObservableObject {
         case idle, loading, done, failed(String)
     }
 
-    /// 单个翻译服务的结果
+    /// 翻译结果
     struct ServiceResult: Equatable {
         var phase: Phase = .idle
         var text = ""
@@ -45,23 +45,24 @@ final class TranslatorModel: ObservableObject {
     @Published var target: TargetLanguage = .auto {
         didSet { if oldValue != target { translate() } }
     }
-    @Published var system = ServiceResult()
-    @Published var openAI = ServiceResult()
+    /// 当前所选模型的结果
+    @Published var result = ServiceResult()
     /// 交给 SwiftUI `.translationTask` 使用；赋新值或 invalidate() 会触发一次系统翻译
     @Published var configuration: TranslationSession.Configuration?
 
     private var openAITask: Task<Void, Never>?
+    /// 正在等待 `.translationTask` 回调；切换到大模型后置为 false，丢弃迟到的系统翻译结果
+    private var awaitingSystem = false
     /// 本次翻译实际使用的目标语言
     private var currentTarget = Locale.Language(identifier: "zh-Hans")
 
     func beginRecognizing(origin: TranslationRecord.Origin) {
         self.origin = origin
-        openAITask?.cancel()
+        cancelPending()
         sourceText = ""
         sourceError = nil
         detectedSource = nil
-        system = ServiceResult()
-        openAI = ServiceResult()
+        result = ServiceResult()
         isRecognizing = true
     }
 
@@ -77,10 +78,11 @@ final class TranslatorModel: ObservableObject {
         sourceError = message
     }
 
+    /// 用当前所选模型（系统翻译或大模型）翻译原文；切换模型或提示词后也调用它
     func translate() {
-        openAITask?.cancel()
-        system = ServiceResult()
-        openAI = ServiceResult()
+        guard !isRecognizing else { return }
+        cancelPending()
+        result = ServiceResult()
 
         let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
@@ -92,30 +94,27 @@ final class TranslatorModel: ObservableObject {
         detectedSource = source
         let targetLanguage = resolvedTarget(for: source)
         currentTarget = targetLanguage
+        result.phase = .loading
 
-        if settings.systemEnabled {
-            system.phase = .loading
+        if settings.selectedModel?.isSystem ?? true {
+            awaitingSystem = true
             let newConfig = TranslationSession.Configuration(source: source, target: targetLanguage)
             if configuration?.source == newConfig.source, configuration?.target == newConfig.target {
                 configuration?.invalidate()
             } else {
                 configuration = newConfig
             }
+        } else {
+            startOpenAI(text)
         }
-
-        if settings.openAIEnabled { startOpenAI(text) }
     }
 
-    /// 切换模型或提示词后，只重新请求大模型这一张卡片
-    func rerunOpenAI() {
-        let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard settings.openAIEnabled, !text.isEmpty, !isRecognizing else { return }
-        startOpenAI(text)
+    private func cancelPending() {
+        openAITask?.cancel()
+        awaitingSystem = false
     }
 
     private func startOpenAI(_ text: String) {
-        openAITask?.cancel()
-        openAI = ServiceResult(phase: .loading)
         let from = detectedSource.map(Self.englishName) ?? "the detected language"
         let to = Self.englishName(currentTarget)
         let config = settings.openAIConfig
@@ -126,15 +125,19 @@ final class TranslatorModel: ObservableObject {
 
     /// 由 `.translationTask` 回调
     func run(_ session: TranslationSession) async {
-        guard system.phase == .loading else { return }
+        guard awaitingSystem else { return }
         let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             let response = try await session.translate(text)
-            system = ServiceResult(phase: .done, text: response.targetText)
+            guard awaitingSystem else { return }
+            awaitingSystem = false
+            result = ServiceResult(phase: .done, text: response.targetText)
             detectedSource = response.sourceLanguage
             record(text, service: "system", model: nil, result: response.targetText)
         } catch {
-            system.phase = .failed("翻译失败：\(error.localizedDescription)")
+            guard awaitingSystem else { return }
+            awaitingSystem = false
+            result.phase = .failed("翻译失败：\(error.localizedDescription)")
         }
     }
 
@@ -143,14 +146,14 @@ final class TranslatorModel: ObservableObject {
         do {
             try await OpenAIClient.translate(text, from: from, to: to, config: config) { [weak self] delta in
                 guard let self, !Task.isCancelled else { return }
-                self.openAI.text += delta
+                self.result.text += delta
             }
             guard !Task.isCancelled else { return }
-            openAI.phase = .done
-            record(text, service: "openai", model: label, result: openAI.text)
+            result.phase = .done
+            record(text, service: "openai", model: label, result: result.text)
         } catch {
             guard !Task.isCancelled else { return }
-            openAI.phase = .failed("请求失败：\(error.localizedDescription)")
+            result.phase = .failed("请求失败：\(error.localizedDescription)")
         }
     }
 

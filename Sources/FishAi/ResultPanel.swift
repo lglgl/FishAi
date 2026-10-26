@@ -10,28 +10,39 @@ final class ResultPanel: NSPanel {
     }
 }
 
-/// 未固定时，面板失去焦点（点击别处）即关闭；固定后常驻并保持位置
+/// 未固定时，点击其他应用或切到其他应用即关闭面板；固定后常驻并保持位置
 @MainActor
-final class ResultPanelController: NSObject, NSWindowDelegate {
+final class ResultPanelController: NSObject {
     let model = TranslatorModel()
     private lazy var panel: ResultPanel = makePanel()
     private var pinButton: NSButton!
+    private var clickMonitor: Any?
     private var isPinned = false {
         didSet { updatePinButton() }
     }
 
+    override init() {
+        super.init()
+        // 全局监听只会收到发往其他应用的点击，点本应用的窗口或菜单栏图标不会触发
+        clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) {
+            [weak self] _ in
+            MainActor.assumeIsolated { self?.closeIfUnpinned() }
+        }
+        NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil,
+                                               queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.closeIfUnpinned() }
+        }
+    }
+
     func show() {
         if !panel.isVisible { positionNearMouse() }
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         panel.makeKeyAndOrderFront(nil)
     }
 
-    func windowDidResignKey(_ notification: Notification) {
-        // 焦点切到本应用其他窗口（如设置）时不关闭，只在切到其他应用后关闭
-        DispatchQueue.main.async { [weak self] in
-            guard let self, !self.isPinned, !self.panel.isKeyWindow, NSApp.keyWindow == nil else { return }
-            self.panel.orderOut(nil)
-        }
+    private func closeIfUnpinned() {
+        guard !isPinned, panel.isVisible else { return }
+        panel.orderOut(nil)
     }
 
     @objc private func togglePin() {
@@ -75,7 +86,6 @@ final class ResultPanelController: NSObject, NSWindowDelegate {
         panel.isReleasedWhenClosed = false
         panel.minSize = NSSize(width: 320, height: 300)
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
-        panel.delegate = self
         panel.addTitlebarAccessoryViewController(makePinAccessory())
 
         // 毛玻璃背景

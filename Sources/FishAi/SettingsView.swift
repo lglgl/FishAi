@@ -44,11 +44,6 @@ private struct GeneralSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("翻译服务") {
-                Toggle("系统翻译（离线）", isOn: $settings.systemEnabled)
-                Toggle("OpenAI 兼容接口", isOn: $settings.openAIEnabled)
-            }
-
             Section {
                 Toggle("保存翻译记录", isOn: $settings.historyEnabled)
             } footer: {
@@ -71,10 +66,33 @@ private struct ModelsView: View {
             items: settings.models, title: { $0.name }, selection: $selection,
             onAdd: { settings.addModel() },
             onCopy: { id in settings.addModel(copying: settings.models.first { $0.id == id }) },
-            onDelete: { settings.deleteModel(id: $0) }
+            onDelete: { settings.deleteModel(id: $0) },
+            isLocked: \.isSystem
         ) { id in
-            ModelEditor(id: id).id(id)
+            if settings.models.first(where: { $0.id == id })?.isSystem == true {
+                SystemModelInfo()
+            } else {
+                ModelEditor(id: id).id(id)
+            }
         }
+    }
+}
+
+/// 内置的系统翻译：不可编辑或删除
+private struct SystemModelInfo: View {
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("名称", value: "系统翻译")
+                LabeledContent("引擎", value: "Apple Translation（macOS 内置）")
+                LabeledContent("网络", value: "离线，不上传文字")
+                LabeledContent("API Key", value: "不需要")
+            } footer: {
+                Text("默认模型。内置且不可删除；不使用提示词。首次翻译某个语言对时，系统会提示下载语言包，也可以在「系统设置 → 通用 → 语言与地区 → 翻译语言」中提前下载。")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 
@@ -218,16 +236,27 @@ private struct ManagerLayout<Item: Identifiable, Detail: View>: View where Item.
     let onAdd: () -> Int64
     let onCopy: (Int64) -> Int64
     let onDelete: (Int64) -> Void
+    /// 内置条目：不可删除或复制，列表中显示锁
+    var isLocked: (Item) -> Bool = { _ in false }
     @ViewBuilder let detail: (Int64) -> Detail
 
     @State private var confirmDelete = false
+
+    private var selectedItem: Item? { items.first { $0.id == selection } }
 
     var body: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
                 List(selection: $selection) {
                     ForEach(items) { item in
-                        Text(title(item).isEmpty ? "未命名" : title(item)).tag(item.id)
+                        HStack {
+                            Text(title(item).isEmpty ? "未命名" : title(item))
+                            if isLocked(item) {
+                                Spacer()
+                                Image(systemName: "lock.fill").font(.system(size: 10)).foregroundStyle(.secondary)
+                            }
+                        }
+                        .tag(item.id)
                     }
                 }
                 Divider()
@@ -236,12 +265,12 @@ private struct ManagerLayout<Item: Identifiable, Detail: View>: View where Item.
                         .help("新建")
                     Button { confirmDelete = true } label: { Image(systemName: "minus").frame(width: 22, height: 22) }
                         .help("删除")
-                        .disabled(selection == nil || items.count <= 1)
+                        .disabled(selectedItem.map(isLocked) ?? true || items.count <= 1)
                     Button {
                         if let selection { self.selection = onCopy(selection) }
                     } label: { Image(systemName: "doc.on.doc").frame(width: 22, height: 22) }
                         .help("复制")
-                        .disabled(selection == nil)
+                        .disabled(selectedItem.map(isLocked) ?? true)
                     Spacer()
                 }
                 .buttonStyle(.borderless)

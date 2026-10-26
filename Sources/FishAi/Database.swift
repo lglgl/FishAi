@@ -3,12 +3,21 @@ import SQLite3
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-/// 一个 OpenAI 兼容的大模型接口；API Key 不入库，按 id 存在钥匙串
+/// 一个翻译模型：内置的系统翻译，或 OpenAI 兼容的大模型接口（API Key 不入库，按 id 存在钥匙串）
 struct LLMModel: Identifiable, Equatable {
+    enum Kind: String {
+        /// macOS 系统翻译（Apple Translation 框架），内置且不可删除
+        case system
+        case openAI = "openai"
+    }
+
     var id: Int64
     var name: String
     var baseURL: String
     var model: String
+    var kind: Kind = .openAI
+
+    var isSystem: Bool { kind == .system }
 }
 
 /// 一组提示词，变量：{from} 源语言、{to} 目标语言、{text} 原文
@@ -76,6 +85,7 @@ final class Database {
         let version = try query("PRAGMA user_version", row: { $0.int(0) }).first ?? 0
         if version < 1 { try migrateToV1() }
         if version < 2 { try migrateToV2() }
+        if version < 3 { try migrateToV3() }
     }
 
     private func migrateToV1() throws {
@@ -155,11 +165,27 @@ final class Database {
         }
     }
 
+    /// v3：models 增加 kind 列，并内置一条系统翻译
+    private func migrateToV3() throws {
+        try execute("BEGIN")
+        do {
+            try execute("ALTER TABLE models ADD COLUMN kind TEXT NOT NULL DEFAULT 'openai'")
+            insertModel(LLMModel(id: 0, name: "系统翻译", baseURL: "", model: "", kind: .system))
+            try execute("PRAGMA user_version = 3")
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
     // MARK: - 模型
 
+    /// 系统翻译排在最前
     func fetchModels() -> [LLMModel] {
-        (try? query("SELECT id, name, base_url, model FROM models ORDER BY id") { row in
-            LLMModel(id: row.int(0), name: row.text(1), baseURL: row.text(2), model: row.text(3))
+        (try? query("SELECT id, name, base_url, model, kind FROM models ORDER BY kind = 'system' DESC, id") { row in
+            LLMModel(id: row.int(0), name: row.text(1), baseURL: row.text(2), model: row.text(3),
+                     kind: LLMModel.Kind(rawValue: row.text(4)) ?? .openAI)
         }) ?? []
     }
 
@@ -167,8 +193,9 @@ final class Database {
     func insertModel(_ model: LLMModel) -> Int64 {
         let now = Date().timeIntervalSince1970
         try? execute("""
-            INSERT INTO models (name, base_url, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
-            """, [.text(model.name), .text(model.baseURL), .text(model.model), .real(now), .real(now)])
+            INSERT INTO models (name, base_url, model, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+            """, [.text(model.name), .text(model.baseURL), .text(model.model), .text(model.kind.rawValue),
+                  .real(now), .real(now)])
         return sqlite3_last_insert_rowid(db)
     }
 
@@ -179,7 +206,7 @@ final class Database {
     }
 
     func deleteModel(id: Int64) {
-        try? execute("DELETE FROM models WHERE id = ?", [.int(id)])
+        try? execute("DELETE FROM models WHERE id = ? AND kind != 'system'", [.int(id)])
     }
 
     // MARK: - 提示词

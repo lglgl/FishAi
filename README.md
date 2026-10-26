@@ -2,8 +2,10 @@
 
 macOS 原生的截图 / 划词 / 剪贴板翻译工具，交互参考 Bob。文字识别用系统 Vision（本地 OCR），翻译可以同时走两路：
 
-- **系统翻译**：Apple Translation 框架，离线
-- **大模型**：任意 OpenAI 兼容的 `/chat/completions` 接口（OpenAI、DeepSeek、智谱、Ollama 等），流式输出，模型和提示词都可以自由组合
+- **系统翻译**（默认）：Apple Translation 框架，离线，作为内置模型出现在模型列表第一位
+- **大模型**：任意 OpenAI 兼容的 `/chat/completions` 接口（OpenAI、DeepSeek、智谱、Ollama 等），流式输出，可以和提示词自由组合
+
+翻译面板里选哪个模型，就用哪种方式翻译。
 
 本文档写给接手的开发者（包括 AI）：读完就能构建、运行、理解架构并继续开发。
 
@@ -83,17 +85,17 @@ rm fishai.key fishai.p12
 
 - **原文卡片**：可以编辑，`⌘↩` 重新翻译
 - **语言栏**：显示检测到的源语言，目标语言可选（「自动」= 原文是中文译成英文，否则译成简体中文）
-- **模型 / 提示词下拉框**：只在开启大模型时显示，切换后只重新请求大模型那张卡片
-- **结果卡片**：每个启用的服务一张（系统翻译、「模型名 · 提示词名」），大模型流式输出，都可以复制
-- **右上角图钉**：不固定时，焦点切到其他应用就关闭面板；固定后面板常驻，位置也不再跟随鼠标
+- **模型 / 提示词下拉框**：模型默认是「系统翻译」；选了大模型才能选提示词。切换后立即重新翻译
+- **结果卡片**：显示所选模型的结果（「系统翻译」或「模型名 · 提示词名」），大模型流式输出，可以复制
+- **右上角图钉**：不固定时，点击其他应用或切到其他应用就关闭面板；固定后面板常驻，位置也不再跟随鼠标
 - `Esc` 关闭
 
 设置窗口：
 
 | 页面 | 内容 |
 |---|---|
-| 通用 | 三个快捷键（点击录制，需包含 ⌘ / ⌥ / ⌃，F1–F12 可单独用；可清除、恢复默认；被占用时显示橙色警告）；系统翻译 / 大模型开关；是否保存翻译记录 |
-| 模型 | 左边列表（新建 / 删除 / 复制），右边编辑：名称、Base URL、API Key、模型名、测试连接 |
+| 通用 | 三个快捷键（点击录制，需包含 ⌘ / ⌥ / ⌃，F1–F12 可单独用；可清除、恢复默认；被占用时显示橙色警告）；是否保存翻译记录 |
+| 模型 | 左边列表（新建 / 删除 / 复制），第一项是内置的「系统翻译」（带锁，不可删除或编辑）；大模型右边编辑：名称、Base URL、API Key、模型名、测试连接 |
 | 提示词 | 左边列表，右边编辑：名称、系统提示词、用户提示词。预置「翻译」「解释」「润色」 |
 | 翻译记录 | 搜索原文或译文，右键复制或删除，可以清空 |
 
@@ -147,6 +149,7 @@ FishAi/
 │              TextRecognizer（图片 → 文字）                              │
 ├──────────────────────────────────────────────────────────────────────┤
 │ 翻译编排     TranslatorModel（@MainActor ObservableObject）              │
+│              按所选模型二选一：                                         │
 │              ├─ 系统翻译：设置 TranslationSession.Configuration          │
 │              │            → ResultView 的 .translationTask 回调 run()   │
 │              └─ 大模型：OpenAIClient.translate（流式回调 onDelta）        │
@@ -171,12 +174,12 @@ FishAi/
        ├─ TextRecognizer.recognize(image)         Vision OCR（后台队列）
        └─ model.setSource(text, origin:) → translate()
             ├─ NLLanguageRecognizer 检测源语言 → resolvedTarget() 得到目标语言
-            ├─ 系统翻译开启：configuration = .init(source:target:)，相同则 invalidate()
+            ├─ 所选模型是系统翻译：awaitingSystem = true；configuration = .init(source:target:)，相同则 invalidate()
             │     └─ SwiftUI .translationTask 触发 → model.run(session) → session.translate()
-            │           → system = .done → record(service: "system")
-            └─ 大模型开启：startOpenAI(text)
-                  └─ Task { OpenAIClient.translate(..., onDelta) }   每个增量追加到 openAI.text
-                        → openAI = .done → record(service: "openai", model: "模型名 · 提示词名")
+            │           → result = .done → record(service: "system")
+            └─ 所选模型是大模型：startOpenAI(text)
+                  └─ Task { OpenAIClient.translate(..., onDelta) }   每个增量追加到 result.text
+                        → result = .done → record(service: "openai", model: "模型名 · 提示词名")
 ```
 
 划词（`⌥D`）和剪贴板（`⌥V`）只是入口不同：拿到文字后直接调用 `panel.show()` + `model.setSource(text, origin:)`，剪贴板是图片时走 `recognizeAndTranslate`。
@@ -184,13 +187,13 @@ FishAi/
 ### 关键设计
 
 - **系统翻译只能在 SwiftUI 里拿到 session。** macOS 15 上没有公开的 `TranslationSession` 构造器（26 以后的 `init(installedSource:)` 只适用于已安装的语言），所以要通过 `ResultView` 上的 `.translationTask(model.configuration)` 拿 session。`TranslatorModel` 改写 `configuration`，或调用 `invalidate()`，就会触发一次 `run(_:)`。**面板视图必须已经创建**：`panel.show()` 要在 `setSource` 之前调用。
-- **大模型请求可以单独重跑。** `rerunOpenAI()` 只取消并重启大模型那个 Task，系统翻译的结果不动。切换模型或提示词下拉框时会调它。
-- **取消。** 每次新翻译都会 `openAITask?.cancel()`，流式回调和结束时都会检查 `Task.isCancelled`，避免旧结果覆盖新结果。
+- **一个模型对应一个结果。** `TranslatorModel.result` 只保存当前所选模型的结果。切换模型或提示词下拉框时直接调 `translate()`（系统翻译模式下切换提示词不触发）。
+- **取消。** 每次新翻译都会 `cancelPending()`：取消大模型 Task（流式回调和结束时都会检查 `Task.isCancelled`），并清除 `awaitingSystem`，丢弃迟到的系统翻译回调，避免旧结果覆盖新结果。
 - **提示词变量。** `{from}`、`{to}` 用英文语言名（`englishName`，比如 `Chinese, Simplified`），`{text}` 是原文。系统提示词为空时不发 system 消息。
 - **OpenAI 兼容处理。** Base URL 可以填 `…/v1`，也可以填完整的 `…/chat/completions`。响应是 `text/event-stream` 就按 SSE 逐行解析 `data:`；否则读完整个 body，按非流式 JSON 解析，非 200 时取 `error.message`。没有填 API Key 就不带 `Authorization` 头（适用于本地 Ollama）。不发送 `temperature`，因为部分推理模型会拒绝这个参数。
 - **全局快捷键。** 用 Carbon `RegisterEventHotKey`，不需要辅助功能权限。`AppSettings` 里三个快捷键或 `isRecordingShortcut` 一变，就调 `registerHotKeys()` 全部重新注册。录制快捷键期间会暂停全部热键，防止按下已注册的组合时触发功能。注册失败的写入 `shortcutConflicts`，设置页据此显示警告。注意：`@Published` 在 willSet 时发出通知，所以订阅里要 `.receive(on: DispatchQueue.main)` 推迟一拍，再读取新值。
 - **菜单栏应用的编辑快捷键。** `.accessory` 应用默认没有主菜单，`⌘C`、`⌘V`、`⌘W` 都不生效。`setupMainMenu()` 建了一个不显示的主菜单（应用菜单 + 编辑菜单）来响应这些快捷键。
-- **面板失焦关闭。** `ResultPanelController` 是 panel 的 delegate。`windowDidResignKey` 中先推迟一拍，如果此时没有固定、面板也不是 key，并且 `NSApp.keyWindow == nil`（焦点已经离开本应用），就 `orderOut`。切到本应用的设置窗口时不会关闭。图钉按钮是 `NSTitlebarAccessoryViewController`（`.trailing`），没有放在 SwiftUI 里，因为透明标题栏区域的 SwiftUI 控件不一定能收到点击。
+- **面板点击外部关闭。** `ResultPanelController` 注册了全局鼠标监听 `NSEvent.addGlobalMonitorForEvents(.leftMouseDown/.rightMouseDown/.otherMouseDown)`（只会收到发往其他应用的点击，不需要辅助功能权限），并监听 `NSApplication.didResignActiveNotification`。没有固定时，这两种事件都会让面板 `orderOut`；点击本应用的窗口或菜单栏图标不会触发。早期用 `windowDidResignKey` 判断，在浮动面板上不可靠，已经弃用。图钉按钮是 `NSTitlebarAccessoryViewController`（`.trailing`），没有放在 SwiftUI 里，因为透明标题栏区域的 SwiftUI 控件不一定能收到点击。
 - **划词。** 先用 AX 读 `kAXFocusedUIElement → kAXSelectedText`，原生应用一般都能读到。读不到时（Chrome、Electron 等）就备份剪贴板的全部条目，发送一个 flags 只含 `.maskCommand` 的 ⌘C（这样可以忽略用户还按着的 ⌥），再轮询 `changeCount`，最多约 500ms，读完后还原剪贴板。
 - **并发模型。** 所有状态类（`AppSettings`、`HistoryStore`、`Database`、`TranslatorModel`、`AppDelegate`）都是 `@MainActor`。SQLite 操作都很小，直接在主线程执行。Vision 在全局队列上执行；网络请求用 URLSession 的 async API。
 
@@ -204,14 +207,15 @@ FishAi/
 | 开关、快捷键、当前选择 | UserDefaults，域 `com.lglgl.FishAi` |
 | API Key | 登录钥匙串，service `com.lglgl.FishAi`，account `openai-api-key-<models.id>` |
 
-### SQLite schema（`PRAGMA user_version = 2`）
+### SQLite schema（`PRAGMA user_version = 3`）
 
 ```sql
 CREATE TABLE models (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,              -- 显示名，如「DeepSeek」
     base_url TEXT NOT NULL,          -- https://api.openai.com/v1 或完整 /chat/completions
-    model TEXT NOT NULL,             -- 请求体里的 model 字段
+    model TEXT NOT NULL,             -- 请求体里的 model 字段（系统翻译为空）
+    kind TEXT NOT NULL DEFAULT 'openai', -- system（内置系统翻译，唯一且不可删）| openai
     created_at REAL NOT NULL,        -- Unix 时间戳（秒）
     updated_at REAL NOT NULL
 );
@@ -245,22 +249,23 @@ CREATE INDEX idx_translations_created_at ON translations (created_at DESC);
 
 - **v1**：建 `model_configs`（模型和提示词放在同一张表）和 `translations`。
 - **v2**（在一个事务里）：建 `models` 和 `prompts`。把 `model_configs` **保留原 id** 复制到 `models`，这样钥匙串的 `openai-api-key-<id>` 仍能对上。旧配置里的提示词去重后写入 `prompts`（第一组叫「翻译」）。最后删除 `model_configs`。
+- **v3**（在一个事务里）：`models` 增加 `kind` 列，插入一条 `kind = 'system'` 的「系统翻译」。`fetchModels()` 按 `kind = 'system' DESC, id` 排序，所以系统翻译总在第一位；`deleteModel` 的 SQL 里也排除了 system。
 
-新增 schema 变更时，加一个 `migrateToV3()`，在 `migrate()` 里追加 `if version < 3`，并把 `user_version` 设为 3。
+新增 schema 变更时，加一个 `migrateToV4()`，在 `migrate()` 里追加 `if version < 4`，并把 `user_version` 设为 4。
 
 `AppSettings.init` 里还有两步应用层的初始化，每一步都可以重复执行：
 
-1. `migrateLegacyConfigIfNeeded()`：最早的版本把单组配置存在 UserDefaults（`openAIBaseURL` 等）和钥匙串（`openai-api-key`）。没有模型时，用这些旧值建一个「默认」模型，再清掉旧键；旧 API Key 归到第一个模型名下。
+1. `migrateLegacyConfigIfNeeded()`：最早的版本把单组配置存在 UserDefaults（`openAIBaseURL` 等）和钥匙串（`openai-api-key`）。存在这些旧值、又还没有大模型时，用它们建一个「默认」模型，再清掉旧键（连同 v3 起不再使用的 `systemEnabled`、`openAIEnabled`）；旧 API Key 归到第一个大模型名下。
 2. 预置提示词只补一次（标记 `builtinPromptsSeeded`）：名称不重复的「翻译」「解释」「润色」才会插入，用户删掉后不会再出现。
+3. 系统翻译设为默认模型只做一次（标记 `systemModelDefaulted`），之后尊重用户在面板里的选择。
 
 ### UserDefaults 键
 
 | 键 | 类型 | 默认 |
 |---|---|---|
-| `systemEnabled` | Bool | true |
-| `openAIEnabled` | Bool | false |
 | `historyEnabled` | Bool | true |
-| `selectedModelID` / `selectedPromptID` | Int64 | 不存在时取第一个 |
+| `selectedModelID` / `selectedPromptID` | Int64 | 不存在时取第一个（模型的第一个即系统翻译） |
+| `systemModelDefaulted` | Bool | false |
 | `screenshotShortcut` / `selectionShortcut` / `clipboardShortcut` | Data（JSON 编码的 `Shortcut`）。键不存在 = 用默认值；空 Data = 用户已清除 | `⌥S` / `⌥D` / `⌥V` |
 | `builtinPromptsSeeded` | Bool | false |
 
@@ -324,5 +329,5 @@ CREATE INDEX idx_translations_created_at ON translations (created_at DESC);
 - UI 状态和存储都在 `@MainActor` 上；新的状态类也照此处理。
 - 新增设置项：UserDefaults 键加到 `AppSettings.Key`，在 `init` 里读出初始值，在 `didSet` 里写回。结构化数据放 SQLite，同时加一个迁移版本。
 - 新增全局快捷键：在 `Shortcut` 里加默认值，在 `AppSettings` 里加 `@Published` 属性、键和 `ShortcutAction`，在 `AppDelegate.registerHotKeys()` 的 `bindings` 里加一行，在合并订阅里也加上并调整 `dropFirst` 的数量，最后在 `GeneralSettingsView` 里加一个 `ShortcutRecorder`。
-- 新增翻译服务：在 `TranslatorModel` 里加一个 `ServiceResult` 和对应的启动 / 取消逻辑，在 `ResultView` 里加一个 `ServiceCard`，再加一个开关设置；完成时调 `record(service:)`。
+- 新增一种翻译引擎：在 `LLMModel.Kind` 里加一个值（必要时加 schema 迁移），在 `TranslatorModel.translate()` 里按 kind 分支并实现启动 / 取消逻辑，完成时调 `record(service:)`；在 `ModelsView` 里为它提供编辑界面。
 - 提交信息用英文，祈使句。
