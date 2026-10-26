@@ -24,11 +24,12 @@ final class AppSettings: ObservableObject {
         static let userPrompt = "openAIUserPrompt"
         static let screenshotShortcut = "screenshotShortcut"
         static let clipboardShortcut = "clipboardShortcut"
+        static let selectionShortcut = "selectionShortcut"
         static let apiKeyAccount = "openai-api-key"
     }
 
     enum ShortcutAction: String {
-        case screenshot, clipboard
+        case screenshot, clipboard, selection
     }
 
     private let defaults = UserDefaults.standard
@@ -43,6 +44,7 @@ final class AppSettings: ObservableObject {
     /// nil 表示未设置快捷键
     @Published var screenshotShortcut: Shortcut? { didSet { save(screenshotShortcut, forKey: Key.screenshotShortcut) } }
     @Published var clipboardShortcut: Shortcut? { didSet { save(clipboardShortcut, forKey: Key.clipboardShortcut) } }
+    @Published var selectionShortcut: Shortcut? { didSet { save(selectionShortcut, forKey: Key.selectionShortcut) } }
 
     /// 录制快捷键期间暂停全局快捷键，避免按下已注册的组合键时触发功能
     @Published var isRecordingShortcut = false
@@ -67,6 +69,7 @@ final class AppSettings: ObservableObject {
         apiKey = Keychain.get(account: Key.apiKeyAccount) ?? ""
         screenshotShortcut = Self.load(Key.screenshotShortcut, default: .screenshotDefault)
         clipboardShortcut = Self.load(Key.clipboardShortcut, default: .clipboardDefault)
+        selectionShortcut = Self.load(Key.selectionShortcut, default: .selectionDefault)
     }
 
     private func save(_ shortcut: Shortcut?, forKey key: String) {

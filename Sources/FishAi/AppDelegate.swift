@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var screenshotItem: NSMenuItem!
     private var clipboardItem: NSMenuItem!
+    private var selectionItem: NSMenuItem!
     private var hotKeys: [HotKey] = []
     private var cancellables = Set<AnyCancellable>()
     private let settings = AppSettings.shared
@@ -20,8 +21,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // @Published 在赋值前发出通知，延后一拍再读取新值
         settings.$screenshotShortcut.map { _ in () }
             .merge(with: settings.$clipboardShortcut.map { _ in () },
+                   settings.$selectionShortcut.map { _ in () },
                    settings.$isRecordingShortcut.map { _ in () })
-            .dropFirst(3)
+            .dropFirst(4)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.registerHotKeys() }
             .store(in: &cancellables)
@@ -44,6 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         screenshotItem = NSMenuItem(title: "截图翻译", action: #selector(screenshotTranslate), keyEquivalent: "")
         screenshotItem.target = self
         menu.addItem(screenshotItem)
+        selectionItem = NSMenuItem(title: "划词翻译", action: #selector(selectionTranslate), keyEquivalent: "")
+        selectionItem.target = self
+        menu.addItem(selectionItem)
         clipboardItem = NSMenuItem(title: "剪贴板翻译", action: #selector(clipboardTranslate), keyEquivalent: "")
         clipboardItem.target = self
         menu.addItem(clipboardItem)
@@ -86,6 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var conflicts = Set<AppSettings.ShortcutAction>()
         let bindings: [(AppSettings.ShortcutAction, Shortcut?, NSMenuItem, () -> Void)] = [
             (.screenshot, settings.screenshotShortcut, screenshotItem, { [weak self] in self?.screenshotTranslate() }),
+            (.selection, settings.selectionShortcut, selectionItem, { [weak self] in self?.selectionTranslate() }),
             (.clipboard, settings.clipboardShortcut, clipboardItem, { [weak self] in self?.clipboardTranslate() }),
         ]
         for (action, shortcut, item, handler) in bindings {
@@ -119,6 +125,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             guard let image = await ScreenCapture.captureInteractively() else { return }
             await recognizeAndTranslate(image)
+        }
+    }
+
+    /// 翻译前台应用中选中的文字
+    @objc func selectionTranslate() {
+        guard SelectionReader.ensurePermission() else { return }
+        Task { @MainActor in
+            let text = await SelectionReader.selectedText()
+            panel.show()
+            if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                panel.model.setSource(text)
+            } else {
+                panel.model.beginRecognizing()
+                panel.model.fail("未获取到选中的文字")
+            }
         }
     }
 

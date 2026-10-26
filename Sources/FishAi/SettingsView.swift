@@ -16,6 +16,10 @@ struct SettingsView: View {
                     ShortcutRecorder(shortcut: $settings.screenshotShortcut, defaultValue: .screenshotDefault,
                                      conflict: settings.shortcutConflicts.contains(.screenshot))
                 }
+                LabeledContent("划词翻译") {
+                    ShortcutRecorder(shortcut: $settings.selectionShortcut, defaultValue: .selectionDefault,
+                                     conflict: settings.shortcutConflicts.contains(.selection))
+                }
                 LabeledContent("剪贴板翻译") {
                     ShortcutRecorder(shortcut: $settings.clipboardShortcut, defaultValue: .clipboardDefault,
                                      conflict: settings.shortcutConflicts.contains(.clipboard))
@@ -23,7 +27,7 @@ struct SettingsView: View {
             } header: {
                 Text("快捷键")
             } footer: {
-                Text("点击后按下组合键（需包含 ⌘、⌥ 或 ⌃），Esc 取消。剪贴板翻译会翻译剪贴板中的文字，若是图片则先识别文字。")
+                Text("点击后按下组合键（需包含 ⌘、⌥ 或 ⌃），Esc 取消。划词翻译需要「辅助功能」权限。剪贴板翻译会翻译剪贴板中的文字，若是图片则先识别文字。")
                     .foregroundStyle(.secondary)
             }
 
@@ -75,7 +79,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 500, height: 680)
+        .frame(width: 500, height: 720)
     }
 
     private func testConnection() {

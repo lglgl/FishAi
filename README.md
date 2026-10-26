@@ -18,6 +18,7 @@ open build/FishAi.app
 ```
 
 - 截图翻译：全局快捷键 `⌥S`，或菜单栏图标 → 截图翻译
+- 划词翻译：全局快捷键 `⌥D`，翻译前台应用中选中的文字（需在「隐私与安全性 → 辅助功能」中授权 FishAi）
 - 剪贴板翻译：全局快捷键 `⌥V`，翻译剪贴板中的文字；剪贴板是图片时先识别文字
 - 首次截图需要在「隐私与安全性 → 屏幕录制」中授权 FishAi
 - 结果面板：可编辑原文后 `⌘↩` 重新翻译，`Esc` 关闭
@@ -55,7 +56,7 @@ rm fishai.key fishai.p12
 
 | 项目 | 说明 |
 |---|---|
-| 快捷键 | 截图翻译、剪贴板翻译的全局快捷键，点击后按下组合键录制（需包含 ⌘、⌥ 或 ⌃），可清除或恢复默认；被其他应用占用时显示警告 |
+| 快捷键 | 截图翻译、划词翻译、剪贴板翻译的全局快捷键，点击后按下组合键录制（需包含 ⌘、⌥ 或 ⌃），可清除或恢复默认；被其他应用占用时显示警告 |
 | 翻译服务 | 分别开关「系统翻译」和「OpenAI 兼容接口」，结果面板为每个启用的服务显示一张卡片 |
 | Base URL | 如 `https://api.openai.com/v1`，也可填完整的 `.../chat/completions` |
 | API Key | 保存在系统钥匙串；本地服务（如 Ollama）可留空 |
@@ -70,6 +71,7 @@ rm fishai.key fishai.p12
 | `HotKey.swift` / `Shortcut.swift` | Carbon 全局快捷键与快捷键模型 |
 | `ScreenCapture.swift` | 调用 `screencapture -i` 交互选区 |
 | `TextRecognizer.swift` | Vision OCR |
+| `SelectionReader.swift` | 读取选中文字（辅助功能接口，失败时模拟 ⌘C 并还原剪贴板） |
 | `TranslatorModel.swift` | 语言检测、目标语言、调度各翻译服务 |
 | `OpenAIClient.swift` | OpenAI 兼容接口（流式 / 非流式） |
 | `AppSettings.swift` / `SettingsView.swift` | 设置存储（UserDefaults + 钥匙串）与设置窗口 |

@@ -10,6 +10,7 @@ struct Shortcut: Codable, Equatable {
 
     static let screenshotDefault = Shortcut(keyCode: UInt32(kVK_ANSI_S), modifiers: UInt32(optionKey), key: "S")
     static let clipboardDefault = Shortcut(keyCode: UInt32(kVK_ANSI_V), modifiers: UInt32(optionKey), key: "V")
+    static let selectionDefault = Shortcut(keyCode: UInt32(kVK_ANSI_D), modifiers: UInt32(optionKey), key: "D")
 
     var displayString: String {
         var s = ""
