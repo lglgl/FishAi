@@ -30,5 +30,13 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-/usr/bin/codesign --force --sign - "$APP"
+# 使用固定证书签名，系统才能在重新构建后保留屏幕录制、钥匙串等授权；
+# 找不到证书时退回 ad-hoc 签名（每次构建都需要重新授权）
+IDENTITY="${FISHAI_SIGN_IDENTITY:-FishAi Dev}"
+if security find-identity -p codesigning | grep -q "\"$IDENTITY\""; then
+    /usr/bin/codesign --force --sign "$IDENTITY" "$APP"
+else
+    echo "warning: signing identity \"$IDENTITY\" not found, using ad-hoc signature" >&2
+    /usr/bin/codesign --force --sign - "$APP"
+fi
 echo "Built $APP"

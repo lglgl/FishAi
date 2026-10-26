@@ -23,7 +23,32 @@ open build/FishAi.app
 - 设置：菜单栏图标 → 设置…（`⌘,`）
 - 调试：`build/FishAi.app/Contents/MacOS/FishAi --image <图片路径>` 跳过截图直接识别翻译
 
-> 构建使用 ad-hoc 签名，每次重新构建后系统可能要求重新授权屏幕录制，读取钥匙串中的 API Key 时也可能再次询问。
+### 代码签名
+
+`build.sh` 默认用钥匙串里名为 `FishAi Dev` 的证书签名（可用环境变量 `FISHAI_SIGN_IDENTITY` 指定其他证书）。固定证书签名后，系统按「Bundle ID + 证书」识别应用，重新构建不会丢失屏幕录制、钥匙串等授权。找不到证书时会退回 ad-hoc 签名，此时每次构建后都需要重新授权。
+
+生成自签名证书（有效期 10 年）：
+
+```bash
+cat > /tmp/fishai-cert.cnf <<'CNF'
+[req]
+distinguished_name = dn
+x509_extensions = ext
+prompt = no
+[dn]
+CN = FishAi Dev
+[ext]
+basicConstraints = critical, CA:false
+keyUsage = critical, digitalSignature
+extendedKeyUsage = critical, codeSigning
+CNF
+cd /tmp && /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+  -config fishai-cert.cnf -keyout fishai.key -out fishai.crt
+/usr/bin/openssl pkcs12 -export -inkey fishai.key -in fishai.crt -name "FishAi Dev" \
+  -out fishai.p12 -passout pass:fishai
+security import fishai.p12 -k ~/Library/Keychains/login.keychain-db -P fishai -T /usr/bin/codesign
+rm fishai.key fishai.p12
+```
 
 ## 设置
 
