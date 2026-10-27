@@ -149,10 +149,21 @@ FishAi 是社区版软件，承诺：
 
 <a id="捐款"></a>
 
-|        支付宝        |      微信支付      |
-| :------------------: | :----------------: |
-|                      |                    |
-| 打开支付宝「扫一扫」 | 打开微信「扫一扫」 |
+<!-- 用 HTML 表格：Markdown 编辑器格式化表格时会删掉单元格里的 <img> -->
+<table align="center">
+  <tr>
+    <th>支付宝</th>
+    <th>微信支付</th>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/images/donate-alipay.jpg" width="200" alt="支付宝捐款二维码"></td>
+    <td align="center"><img src="docs/images/donate-wechat.jpg" width="200" alt="微信支付捐款二维码"></td>
+  </tr>
+  <tr>
+    <td align="center">打开支付宝「扫一扫」</td>
+    <td align="center">打开微信「扫一扫」</td>
+  </tr>
+</table>
 
 扫码后金额为 ¥9.90，收款人显示为「空空」。
 
