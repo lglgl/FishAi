@@ -1,5 +1,7 @@
 # FishAi
 
+每次修改都要加入单次修改的内容和时间（在update log文件)！！！
+
 macOS 原生的截图 / 划词 / 剪贴板翻译工具，交互参考 Bob。文字识别用系统 Vision（本地 OCR），翻译可以同时走两路：
 
 - **系统翻译**（默认）：Apple Translation 框架，离线，作为内置模型出现在模型列表第一位
@@ -15,17 +17,18 @@ macOS 原生的截图 / 划词 / 剪贴板翻译工具，交互参考 Bob。文�
 
 ### 环境要求
 
-| 项目 | 要求 |
-|---|---|
-| 系统 | macOS 15+（Translation 框架的 `.translationTask` 从 15 开始提供） |
-| 工具链 | Xcode 16+ / Swift 6 工具链（`Package.swift` 是 `swift-tools-version: 6.0`，语言模式锁在 Swift 5） |
-| 依赖 | 无第三方依赖，只用系统框架：AppKit、SwiftUI、Vision、Translation、NaturalLanguage、Carbon、ApplicationServices、Security、SQLite3 |
+| 项目   | 要求                                                                                                                              |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| 系统   | macOS 15+（Translation 框架的 `.translationTask` 从 15 开始提供）                                                               |
+| 工具链 | Xcode 16+ / Swift 6 工具链（`Package.swift` 是 `swift-tools-version: 6.0`，语言模式锁在 Swift 5）                             |
+| 依赖   | 无第三方依赖，只用系统框架：AppKit、SwiftUI、Vision、Translation、NaturalLanguage、Carbon、ApplicationServices、Security、SQLite3 |
 
 ### 构建与运行
 
 ```bash
 ./build.sh                  # swift build -c release → 组装 build/FishAi.app → 签名
 open build/FishAi.app       # 菜单栏出现气泡图标，没有 Dock 图标
+./build.sh release          # 发布构建，见下方「发布（Developer ID + 公证）」
 ```
 
 `build.sh` 不依赖 Xcode 工程。它先 `swift build`，再手工组装 `.app`（写 Info.plist，`LSUIElement=true`，Bundle ID `com.lglgl.FishAi`），最后用 `/usr/bin/codesign` 签名。这里特意写了绝对路径：有些机器上 anaconda 带了一个同名的 `codesign`，会抢在系统的前面。
@@ -59,14 +62,36 @@ rm fishai.key fishai.p12
 
 验证签名：`codesign -d -r- build/FishAi.app`，输出应为 `designated => identifier "com.lglgl.FishAi" and certificate leaf = H"…"`。如果输出是 `cdhash H"…"`，说明退回了 ad-hoc 签名。
 
+### 发布（Developer ID + 公证）
+
+FishAi 不上 App Store：App Store 要求开启沙盒，开了以后就不能用辅助功能读取选中文字。发布版通过官网或 GitHub 分发 dmg，`./build.sh release` 会依次完成：
+
+1. 编译通用二进制（arm64 + x86_64）；
+2. 用 Developer ID Application 证书签名，开启 Hardened Runtime（`--options runtime`）并加时间戳；
+3. 打包 `build/FishAi-<版本>.dmg`（内含 `/Applications` 快捷方式），并给 dmg 签名；
+4. 用 `notarytool` 提交公证并等待结果，被拒时打印苹果返回的日志；
+5. 用 `stapler` 把公证票据装订到 dmg 和 `build/FishAi.app`，最后用 `spctl` 验证。
+
+一次性准备：
+
+- 加入 Apple Developer Program，在 Xcode → Settings → Accounts → Manage Certificates 里创建 **Developer ID Application** 证书；
+- 在 appleid.apple.com 生成 App 专用密码，把公证凭据存进钥匙串：
+  ```bash
+  xcrun notarytool store-credentials FishAi-notary --apple-id <Apple ID> --team-id <Team ID> --password <App 专用密码>
+  ```
+
+脚本默认使用钥匙串里第一个 Developer ID Application 证书和 `FishAi-notary` 凭据，可以用 `FISHAI_DEVELOPER_ID`、`FISHAI_NOTARY_PROFILE` 覆盖。版本号写在 `build.sh` 顶部的 `VERSION` / `BUILD_NUMBER`，每次发布前修改。
+
+注意：Developer ID 证书和本地的 `FishAi Dev` 证书不同，系统会把它们当成两个应用，屏幕录制、辅助功能等权限要重新授权一次。
+
 ### 首次运行需要的系统权限
 
-| 权限 | 用途 | 何时申请 |
-|---|---|---|
-| 屏幕与系统音频录制 | 截图翻译 | 第一次按 `⌥S` |
-| 辅助功能 | 划词翻译（读取选中文字、模拟 ⌘C） | 第一次按 `⌥D` |
-| 钥匙串访问 | 读取各模型的 API Key | 第一次读取时，选「始终允许」 |
-| 翻译语言包 | 系统翻译 | 「系统设置 → 通用 → 语言与地区 → 翻译语言」，没下载时系统会弹提示 |
+| 权限               | 用途                               | 何时申请                                                             |
+| ------------------ | ---------------------------------- | -------------------------------------------------------------------- |
+| 屏幕与系统音频录制 | 截图翻译                           | 第一次按 `⌥S`                                                     |
+| 辅助功能           | 划词翻译（读取选中文字、模拟 ⌘C） | 第一次按 `⌥D`                                                     |
+| 钥匙串访问         | 读取各模型的 API Key               | 第一次读取时，选「始终允许」                                         |
+| 翻译语言包         | 系统翻译                           | 「系统设置 → 通用 → 语言与地区 → 翻译语言」，没下载时系统会弹提示 |
 
 授权后需要**退出 FishAi 再重新打开**才生效。重复执行 `open` 只会激活正在运行的那个旧进程，不会重启。
 
@@ -74,12 +99,12 @@ rm fishai.key fishai.p12
 
 ## 2. 功能一览
 
-| 功能 | 默认快捷键 | 说明 |
-|---|---|---|
-| 截图翻译 | `⌥S` | `screencapture -i` 框选区域 → Vision OCR → 翻译 |
-| 划词翻译 | `⌥D` | 读取前台应用选中的文字 → 翻译 |
-| 剪贴板翻译 | `⌥V` | 剪贴板有文字就直接翻译；是图片则先 OCR 再翻译 |
-| 设置 | `⌘,`（菜单栏菜单） | 通用 / 模型 / 提示词 / 翻译记录 四个标签页 |
+| 功能       | 默认快捷键            | 说明                                                |
+| ---------- | --------------------- | --------------------------------------------------- |
+| 截图翻译   | `⌥S`               | `screencapture -i` 框选区域 → Vision OCR → 翻译 |
+| 划词翻译   | `⌥D`               | 读取前台应用选中的文字 → 翻译                      |
+| 剪贴板翻译 | `⌥V`               | 剪贴板有文字就直接翻译；是图片则先 OCR 再翻译       |
+| 设置       | `⌘,`（菜单栏菜单） | 通用 / 模型 / 提示词 / 翻译记录 四个标签页          |
 
 翻译面板（浮动的毛玻璃窗口）：
 
@@ -92,12 +117,12 @@ rm fishai.key fishai.p12
 
 设置窗口：
 
-| 页面 | 内容 |
-|---|---|
-| 通用 | 三个快捷键（点击录制，需包含 ⌘ / ⌥ / ⌃，F1–F12 可单独用；可清除、恢复默认；被占用时显示橙色警告）；是否保存翻译记录 |
-| 模型 | 左边列表（新建 / 删除 / 复制），第一项是内置的「系统翻译」（带锁，不可删除或编辑）；大模型右边编辑：名称、Base URL、API Key、模型名、测试连接 |
-| 提示词 | 左边列表，右边编辑：名称、系统提示词、用户提示词。预置「翻译」「解释」「润色」 |
-| 翻译记录 | 搜索原文或译文，右键复制或删除，可以清空 |
+| 页面     | 内容                                                                                                                                          |
+| -------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| 通用     | 三个快捷键（点击录制，需包含 ⌘ / ⌥ / ⌃，F1–F12 可单独用；可清除、恢复默认；被占用时显示橙色警告）；是否保存翻译记录                       |
+| 模型     | 左边列表（新建 / 删除 / 复制），第一项是内置的「系统翻译」（带锁，不可删除或编辑）；大模型右边编辑：名称、Base URL、API Key、模型名、测试连接 |
+| 提示词   | 左边列表，右边编辑：名称、系统提示词、用户提示词。预置「翻译」「解释」「润色」                                                                |
+| 翻译记录 | 搜索原文或译文，右键复制或删除，可以清空                                                                                                      |
 
 ---
 
@@ -106,7 +131,7 @@ rm fishai.key fishai.p12
 ```
 FishAi/
 ├── Package.swift              SwiftPM 清单：单个 executableTarget，macOS 15，Swift 5 语言模式
-├── build.sh                   构建 → 组装 .app（Info.plist）→ 签名（FishAi Dev 证书，或 ad-hoc）
+├── build.sh                   构建 → 组装 .app（Info.plist）→ 签名；release 模式另做 Developer ID 签名、dmg、公证
 ├── README.md
 ├── .gitignore                 忽略 .build/ 和 build/
 └── Sources/FishAi/
@@ -201,11 +226,11 @@ FishAi/
 
 ## 5. 数据与存储
 
-| 数据 | 位置 |
-|---|---|
-| 模型、提示词、翻译记录 | SQLite：`~/Library/Application Support/FishAi/fishai.sqlite`（WAL 模式） |
-| 开关、快捷键、当前选择 | UserDefaults，域 `com.lglgl.FishAi` |
-| API Key | 登录钥匙串，service `com.lglgl.FishAi`，account `openai-api-key-<models.id>` |
+| 数据                   | 位置                                                                             |
+| ---------------------- | -------------------------------------------------------------------------------- |
+| 模型、提示词、翻译记录 | SQLite：`~/Library/Application Support/FishAi/fishai.sqlite`（WAL 模式）       |
+| 开关、快捷键、当前选择 | UserDefaults，域 `com.lglgl.FishAi`                                            |
+| API Key                | 登录钥匙串，service `com.lglgl.FishAi`，account `openai-api-key-<models.id>` |
 
 ### SQLite schema（`PRAGMA user_version = 3`）
 
@@ -261,13 +286,13 @@ CREATE INDEX idx_translations_created_at ON translations (created_at DESC);
 
 ### UserDefaults 键
 
-| 键 | 类型 | 默认 |
-|---|---|---|
-| `historyEnabled` | Bool | true |
-| `selectedModelID` / `selectedPromptID` | Int64 | 不存在时取第一个（模型的第一个即系统翻译） |
-| `systemModelDefaulted` | Bool | false |
-| `screenshotShortcut` / `selectionShortcut` / `clipboardShortcut` | Data（JSON 编码的 `Shortcut`）。键不存在 = 用默认值；空 Data = 用户已清除 | `⌥S` / `⌥D` / `⌥V` |
-| `builtinPromptsSeeded` | Bool | false |
+| 键                                                                     | 类型                                                                        | 默认                                       |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------ |
+| `historyEnabled`                                                     | Bool                                                                        | true                                       |
+| `selectedModelID` / `selectedPromptID`                             | Int64                                                                       | 不存在时取第一个（模型的第一个即系统翻译） |
+| `systemModelDefaulted`                                               | Bool                                                                        | false                                      |
+| `screenshotShortcut` / `selectionShortcut` / `clipboardShortcut` | Data（JSON 编码的 `Shortcut`）。键不存在 = 用默认值；空 Data = 用户已清除 | `⌥S` / `⌥D` / `⌥V`                |
+| `builtinPromptsSeeded`                                               | Bool                                                                        | false                                      |
 
 ---
 
@@ -293,15 +318,15 @@ CREATE INDEX idx_translations_created_at ON translations (created_at DESC);
 
 ## 7. 已知问题与坑
 
-| 现象 | 原因 / 处理 |
-|---|---|
-| 每次重新构建后又要授权 | 用的是 ad-hoc 签名。改用 `FishAi Dev` 证书签名，见第 1 节 |
-| 截图没有弹出框选 | 应用没有屏幕录制权限，系统会静默拒绝。日志里能看到 `TCC Disallow`。授权后要重启应用 |
-| 第一次 OCR 要 20–30 秒 | 系统要为神经网络引擎（ANE）编译 OCR 模型，之后会缓存。如果每次都慢（缓存失效），执行 `sudo killall aned` 或重启电脑 |
-| 运行 `open` 后新代码没生效 | 旧进程还在运行。先从菜单栏退出，再打开 |
-| 迁移时卡住 | 读取旧钥匙串项会弹授权框，此时进程在等待。不要强杀；迁移可以重复执行，下次启动会补完 |
-| `codesign` 报 NotAMachOFileException | PATH 里有别的 `codesign`（anaconda）。脚本已经写死 `/usr/bin/codesign` |
-| 划词在部分应用里取不到 | AX 读不到时会走模拟 ⌘C 的方式。两种方式都依赖辅助功能权限 |
+| 现象                                   | 原因 / 处理                                                                                                           |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| 每次重新构建后又要授权                 | 用的是 ad-hoc 签名。改用 `FishAi Dev` 证书签名，见第 1 节                                                           |
+| 截图没有弹出框选                       | 应用没有屏幕录制权限，系统会静默拒绝。日志里能看到 `TCC Disallow`。授权后要重启应用                                 |
+| 第一次 OCR 要 20–30 秒                | 系统要为神经网络引擎（ANE）编译 OCR 模型，之后会缓存。如果每次都慢（缓存失效），执行 `sudo killall aned` 或重启电脑 |
+| 运行 `open` 后新代码没生效           | 旧进程还在运行。先从菜单栏退出，再打开                                                                                |
+| 迁移时卡住                             | 读取旧钥匙串项会弹授权框，此时进程在等待。不要强杀；迁移可以重复执行，下次启动会补完                                  |
+| `codesign` 报 NotAMachOFileException | PATH 里有别的 `codesign`（anaconda）。脚本已经写死 `/usr/bin/codesign`                                            |
+| 划词在部分应用里取不到                 | AX 读不到时会走模拟 ⌘C 的方式。两种方式都依赖辅助功能权限                                                            |
 
 ---
 
@@ -324,8 +349,10 @@ CREATE INDEX idx_translations_created_at ON translations (created_at DESC);
 
 ## 9. 开发约定
 
-- 代码注释和界面文案用中文，标识符用英文。
-- 不引入第三方依赖。
+每次修改都要加入单次修改的内容和时间（在update log文件)！！！
+
+- 代码注释和界面文案用中文，标识符用英文，界面保持简洁。
+- 不引入第三方依赖，
 - UI 状态和存储都在 `@MainActor` 上；新的状态类也照此处理。
 - 新增设置项：UserDefaults 键加到 `AppSettings.Key`，在 `init` 里读出初始值，在 `didSet` 里写回。结构化数据放 SQLite，同时加一个迁移版本。
 - 新增全局快捷键：在 `Shortcut` 里加默认值，在 `AppSettings` 里加 `@Published` 属性、键和 `ShortcutAction`，在 `AppDelegate.registerHotKeys()` 的 `bindings` 里加一行，在合并订阅里也加上并调整 `dropFirst` 的数量，最后在 `GeneralSettingsView` 里加一个 `ShortcutRecorder`。

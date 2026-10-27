@@ -28,19 +28,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] in self?.registerHotKeys() }
             .store(in: &cancellables)
 
-        // 调试用：--image <path> 跳过截图直接识别翻译该图片；--clipboard 等同于按下剪贴板翻译快捷键
+        // 调试用：--image <path> 跳过截图直接识别翻译该图片；--clipboard / --selection 等同于按下对应快捷键
+        // （--selection 需配合 open -g 启动，让选中文字的应用留在前台）
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--image"), i + 1 < args.count,
            let image = NSImage(contentsOfFile: args[i + 1])?.cgImage(forProposedRect: nil, context: nil, hints: nil) {
             Task { await recognizeAndTranslate(image, origin: .screenshot) }
         } else if args.contains("--clipboard") {
             clipboardTranslate()
+        } else if args.contains("--selection") {
+            selectionTranslate()
         }
     }
 
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "character.bubble", accessibilityDescription: "FishAi")
+        // 菜单栏小鱼来自 .app 的 Resources；直接 swift run 时没有该资源，退回系统符号
+        let icon = NSImage(named: "MenuBarIcon")
+        icon?.isTemplate = true
+        statusItem.button?.image = icon ?? NSImage(systemSymbolName: "character.bubble", accessibilityDescription: "FishAi")
 
         let menu = NSMenu()
         screenshotItem = NSMenuItem(title: "截图翻译", action: #selector(screenshotTranslate), keyEquivalent: "")
@@ -109,9 +115,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openSettings() {
         if settingsWindow == nil {
-            let window = NSWindow(contentViewController: NSHostingController(rootView: SettingsView()))
+            // 直接用 NSHostingView 承载，窗口大小取 SettingsView 的固定尺寸
+            let hosting = NSHostingView(rootView: SettingsView())
+            let window = NSWindow(contentRect: NSRect(origin: .zero, size: hosting.fittingSize),
+                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            window.contentView = hosting
             window.title = "FishAi 设置"
-            window.styleMask = [.titled, .closable]
             window.isReleasedWhenClosed = false
             window.center()
             settingsWindow = window
@@ -122,23 +131,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func screenshotTranslate() {
         guard ScreenCapture.ensurePermission() else { return }
+        TextRecognizer.prewarm()
         Task { @MainActor in
             guard let image = await ScreenCapture.captureInteractively() else { return }
             await recognizeAndTranslate(image, origin: .screenshot)
         }
     }
 
-    /// 翻译前台应用中选中的文字
+    /// 划词翻译：将前台选中的文字先复制到系统剪贴板，再填入翻译框进行解析与翻译
     @objc func selectionTranslate() {
-        guard SelectionReader.ensurePermission() else { return }
-        Task { @MainActor in
-            let text = await SelectionReader.selectedText()
+        guard SelectionReader.ensurePermission() else {
+            perfLog.notice("selection: accessibility not trusted")
             panel.show()
-            if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            panel.model.beginRecognizing(origin: .selection)
+            panel.model.fail("划词翻译需要「辅助功能」权限：在「系统设置 → 隐私与安全性 → 辅助功能」中打开 FishAi 后重试。若已打开仍不行，先移除 FishAi 再重新添加。")
+            return
+        }
+        Task { @MainActor in
+            // 必须先读选中文字再显示面板：面板会激活 FishAi，焦点和模拟的 ⌘C 都会落到面板上
+            let text = await SelectionReader.copyAndGetSelectedText()
+            panel.show()
+            panel.model.beginRecognizing(origin: .selection)
+            if let text {
+                // 确保选中文本已复制到系统剪贴板
+                SelectionReader.copyToPasteboard(text)
+                // 发送给翻译框输入并触发解析/翻译
                 panel.model.setSource(text, origin: .selection)
             } else {
-                panel.model.beginRecognizing(origin: .selection)
-                panel.model.fail("未获取到选中的文字")
+                panel.model.fail("未检测到选中文本，请先选中需要翻译的内容")
             }
         }
     }
@@ -160,14 +180,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// 使用本地 Vision OCR 识别图像文字，完成后填入翻译框并触发大模型翻译
     private func recognizeAndTranslate(_ image: CGImage, origin: TranslationRecord.Origin) async {
         panel.show()
         panel.model.beginRecognizing(origin: origin)
         do {
             let text = try await TextRecognizer.recognize(image)
-            panel.model.setSource(text, origin: origin)
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                panel.model.fail("本地 OCR 未识别到文字，请重新截取清晰文字区域")
+            } else {
+                if origin == .screenshot && settings.copyRecognizedText {
+                    SelectionReader.copyToPasteboard(trimmed)
+                }
+                panel.model.setSource(trimmed, origin: origin)
+            }
         } catch {
-            panel.model.fail("文字识别失败：\(error.localizedDescription)")
+            panel.model.fail("本地 OCR 识别失败：\(error.localizedDescription)")
         }
     }
 }

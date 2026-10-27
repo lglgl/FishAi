@@ -86,6 +86,7 @@ final class Database {
         if version < 1 { try migrateToV1() }
         if version < 2 { try migrateToV2() }
         if version < 3 { try migrateToV3() }
+        if version < 4 { try migrateToV4() }
     }
 
     private func migrateToV1() throws {
@@ -179,6 +180,81 @@ final class Database {
         }
     }
 
+    /// v4：升级并优化内置中文提示词，保持历史记录上限 10,000 条
+    private func migrateToV4() throws {
+        try execute("BEGIN")
+        do {
+            // 优化旧版英文翻译提示词为高质量中文提示词
+            let chineseTranslationPrompt = """
+                你是一名资深专业同声传译与本地化翻译专家。请将用户提供的文本从 {from} 准确、自然、流畅地翻译为 {to}。
+                要求：
+                1. 忠实原文：准确传达原意，符合目标语言的母语表达习惯，避免机翻感和生硬直译。
+                2. 专业术语：保持专业技术术语、专有名词、代码标识符、缩写和专有格式的准确性。
+                3. 排版格式：严格保留原文的段落结构、换行格式、缩进以及特殊符号。
+                4. 纯净输出：仅输出翻译后的最终文本，严禁包含任何前缀、解释说明、反问、引号或额外元信息。
+                """
+            let chineseExplainPrompt = """
+                你是一名精通多语言对比与语言教学的专家助手。请使用 {to} 对用户提供的文本进行精炼深入的解析：
+                1. 核心意涵：用简练的语言概括句子或段落的主旨意义与语境。
+                2. 重点词汇/短语：提取关键生词、俚语、行业术语或固定搭配，标注词性及常见含义。
+                3. 语法/句式剖析：简析复杂长难句结构、特殊句式或易混淆语法点（如适用）。
+                4. 语境/文化背景：若包含特定文化隐喻、行业行话或背景知识，作简明补充。
+                排版清晰条理，便于快速阅读。
+                """
+            let chinesePolishPrompt = """
+                你是一名母语级资深文字编辑与写作导师。请对用户提供的原文进行深度润色与修饰：
+                1. 语言表达：消除语病，增强用词的精准度、得体性与地道感，提升语句节奏感与文采。
+                2. 逻辑流畅：理顺句间衔接，使行文更加清晰通顺，符合地道自然的表达习惯。
+                3. 保持原意：严格忠于作者的原意与核心观点，不凭空增删事实。
+                4. 输出要求：仅输出润色后的文本，不添加前后说明或额外解释。
+                """
+
+            try execute("""
+                UPDATE prompts
+                SET system_prompt = ?
+                WHERE system_prompt LIKE '%You are a professional translation engine%' OR name = '翻译'
+                """, [.text(chineseTranslationPrompt)])
+            try execute("""
+                UPDATE prompts
+                SET system_prompt = ?
+                WHERE system_prompt LIKE '%You are a helpful language assistant%' OR name = '解释'
+                """, [.text(chineseExplainPrompt)])
+            try execute("""
+                UPDATE prompts
+                SET system_prompt = ?
+                WHERE system_prompt LIKE '%You are a professional editor%' OR name = '润色'
+                """, [.text(chinesePolishPrompt)])
+
+            // 补充总结摘要提示词（若不存在）
+            let summaryCount = (try? query("SELECT COUNT(*) FROM prompts WHERE name = '总结摘要'") { $0.int(0) }.first) ?? 0
+            if summaryCount == 0 {
+                insertPrompt(PromptTemplate(id: 0, name: "总结摘要", systemPrompt: """
+                    你是一名高效的信息分析与摘要专家。请使用 {to} 对用户提供的文本进行结构化提炼：
+                    1. 一句话结论：用最凝练的一句话概括核心结论或主旨。
+                    2. 核心要点：提炼 3~5 个关键要点，采用无序列表清晰呈现。
+                    3. 关键数据/行动项：若有明确的数据指标、结论或后续行动项，单独列出。
+                    要求精炼准确，去除冗余修饰，保持客观中立。
+                    """, userPrompt: "{text}"))
+            }
+
+            // 清理超出 10,000 条的历史记录
+            try execute("""
+                DELETE FROM translations
+                WHERE id IN (
+                    SELECT id FROM translations
+                    ORDER BY created_at DESC
+                    LIMIT -1 OFFSET 10000
+                )
+                """)
+
+            try execute("PRAGMA user_version = 4")
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
     // MARK: - 模型
 
     /// 系统翻译排在最前
@@ -238,6 +314,9 @@ final class Database {
 
     // MARK: - 翻译记录
 
+    /// 最多保留的历史记录条数
+    static let maxHistoryRecords = 10_000
+
     func insertRecord(_ record: TranslationRecord) {
         try? execute("""
             INSERT INTO translations
@@ -247,17 +326,66 @@ final class Database {
                   .text(record.sourceText), record.sourceLang.map(Value.text) ?? .null,
                   .text(record.targetLang), .text(record.service),
                   record.model.map(Value.text) ?? .null, .text(record.resultText)])
+
+        pruneOldRecordsIfNeeded()
     }
 
-    /// 按原文或译文搜索，最新的在前
-    func fetchRecords(search: String = "", limit: Int = 500) -> [TranslationRecord] {
+    /// 超出 10,000 条上限时，利用 created_at 降序索引自动清除最旧记录 (FIFO)
+    func pruneOldRecordsIfNeeded() {
+        try? execute("""
+            DELETE FROM translations
+            WHERE id IN (
+                SELECT id FROM translations
+                ORDER BY created_at DESC
+                LIMIT -1 OFFSET ?
+            )
+            """, [.int(Int64(Self.maxHistoryRecords))])
+    }
+
+    /// 查询当前历史记录总数
+    func recordCount() -> Int {
+        (try? query("SELECT COUNT(*) FROM translations") { $0.int(0) }.first).map(Int.init) ?? 0
+    }
+
+    /// 计算数据库主文件及 WAL / SHM 临时文件的总磁盘占用（字节）
+    func storageSize() -> Int64 {
+        let base = Database.defaultURL
+        let urls = [
+            base,
+            URL(fileURLWithPath: base.path + "-wal"),
+            URL(fileURLWithPath: base.path + "-shm")
+        ]
+        var total: Int64 = 0
+        for url in urls {
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+               let size = attrs[.size] as? Int64 {
+                total += size
+            }
+        }
+        return total
+    }
+
+    /// 格式化磁盘字节数为易读字符串（如 "240 KB", "12.4 MB"）
+    static func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+
+    /// 按原文或译文搜索，最新的在前；默认加载前 500 条
+    /// origin 为 nil 时不按来源筛选
+    func fetchRecords(search: String = "", origin: TranslationRecord.Origin? = nil,
+                      limit: Int = 500, offset: Int = 0) -> [TranslationRecord] {
         let pattern = "%\(search)%"
+        let originValue = origin?.rawValue ?? ""
         return (try? query("""
             SELECT id, created_at, origin, source_text, source_lang, target_lang, service, model, result_text
             FROM translations
-            WHERE ? = '' OR source_text LIKE ? OR result_text LIKE ?
-            ORDER BY created_at DESC LIMIT ?
-            """, [.text(search), .text(pattern), .text(pattern), .int(Int64(limit))]) { row in
+            WHERE (? = '' OR source_text LIKE ? OR result_text LIKE ?) AND (? = '' OR origin = ?)
+            ORDER BY created_at DESC LIMIT ? OFFSET ?
+            """, [.text(search), .text(pattern), .text(pattern), .text(originValue), .text(originValue),
+                  .int(Int64(limit)), .int(Int64(offset))]) { row in
             TranslationRecord(
                 id: row.int(0), createdAt: Date(timeIntervalSince1970: row.double(1)),
                 origin: TranslationRecord.Origin(rawValue: row.text(2)) ?? .manual,

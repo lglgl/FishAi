@@ -87,6 +87,8 @@ final class ResultPanelController: NSObject {
         panel.minSize = NSSize(width: 320, height: 300)
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         panel.addTitlebarAccessoryViewController(makePinAccessory())
+        // 记住用户调整后的窗口大小（位置每次按鼠标重新计算）
+        panel.setFrameAutosaveName("FishAiResultPanel")
 
         // 毛玻璃背景
         let blur = NSVisualEffectView()

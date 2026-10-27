@@ -23,6 +23,8 @@ enum ScreenCapture {
 
     /// 调用系统 screencapture 进行交互式区域选择，用户按 Esc 取消时返回 nil。
     static func captureInteractively() async -> CGImage? {
+        let start = ContinuousClock.now
+        defer { perfLog.notice("capture (含框选): \(start.duration(to: .now))") }
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("fishai-capture-\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: url) }
@@ -30,7 +32,8 @@ enum ScreenCapture {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
         // -i 交互选区  -x 不播放声音
-        process.arguments = ["-i", "-x", url.path]
+        // -J selection 总是从框选模式开始（系统截图设置为「窗口」时 -i 默认进入窗口模式）
+        process.arguments = ["-i", "-x", "-J", "selection", url.path]
 
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             process.terminationHandler = { _ in continuation.resume() }

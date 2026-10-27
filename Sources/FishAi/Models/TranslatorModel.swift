@@ -55,6 +55,8 @@ final class TranslatorModel: ObservableObject {
     private var awaitingSystem = false
     /// 本次翻译实际使用的目标语言
     private var currentTarget = Locale.Language(identifier: "zh-Hans")
+    /// 本次翻译开始时间，用于性能日志
+    private var translateStart = ContinuousClock.now
 
     func beginRecognizing(origin: TranslationRecord.Origin) {
         self.origin = origin
@@ -95,6 +97,7 @@ final class TranslatorModel: ObservableObject {
         let targetLanguage = resolvedTarget(for: source)
         currentTarget = targetLanguage
         result.phase = .loading
+        translateStart = .now
 
         if settings.selectedModel?.isSystem ?? true {
             awaitingSystem = true
@@ -109,14 +112,34 @@ final class TranslatorModel: ObservableObject {
         }
     }
 
+    /// 互换语言：译文作为新原文，目标语言改为原文的语言，再翻译一次
+    func swapLanguages() {
+        let newTarget = TargetLanguage.all.first { candidate in
+            guard candidate != .auto, let source = detectedSource else { return false }
+            guard candidate.language.languageCode == source.languageCode else { return false }
+            // 中文区分简繁：未识别出文字体系时按简体处理
+            guard source.languageCode == .chinese else { return true }
+            return candidate.id == (source.script?.identifier == "Hant" ? "zh-Hant" : "zh-Hans")
+        } ?? .auto
+        if result.phase == .done, !result.text.isEmpty {
+            sourceText = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        origin = .manual
+        if newTarget != target {
+            target = newTarget // didSet 会重新翻译
+        } else {
+            translate()
+        }
+    }
+
     private func cancelPending() {
         openAITask?.cancel()
         awaitingSystem = false
     }
 
     private func startOpenAI(_ text: String) {
-        let from = detectedSource.map(Self.englishName) ?? "the detected language"
-        let to = Self.englishName(currentTarget)
+        let from = detectedSource.map(Self.localizedLanguageName) ?? "自动识别语言"
+        let to = Self.localizedLanguageName(currentTarget)
         let config = settings.openAIConfig
         let label = [settings.selectedModel?.name, settings.selectedPrompt?.name]
             .compactMap { $0 }.joined(separator: " · ")
@@ -132,6 +155,7 @@ final class TranslatorModel: ObservableObject {
             guard awaitingSystem else { return }
             awaitingSystem = false
             result = ServiceResult(phase: .done, text: response.targetText)
+            perfLog.notice("translate system: \(self.translateStart.duration(to: .now))")
             detectedSource = response.sourceLanguage
             record(text, service: "system", model: nil, result: response.targetText)
         } catch {
@@ -146,10 +170,14 @@ final class TranslatorModel: ObservableObject {
         do {
             try await OpenAIClient.translate(text, from: from, to: to, config: config) { [weak self] delta in
                 guard let self, !Task.isCancelled else { return }
+                if self.result.text.isEmpty {
+                    perfLog.notice("translate llm first token: \(self.translateStart.duration(to: .now))")
+                }
                 self.result.text += delta
             }
             guard !Task.isCancelled else { return }
             result.phase = .done
+            perfLog.notice("translate llm done: \(self.translateStart.duration(to: .now))")
             record(text, service: "openai", model: label, result: result.text)
         } catch {
             guard !Task.isCancelled else { return }
@@ -170,11 +198,14 @@ final class TranslatorModel: ObservableObject {
         return Locale.Language(identifier: "zh-Hans")
     }
 
-    /// 提示词里使用的英文语言名，如 "Chinese, Simplified"
-    static func englishName(_ language: Locale.Language) -> String {
+    /// 提示词里使用的中文语言名，如 "简体中文"、"英语"、"日语" 等
+    static func localizedLanguageName(_ language: Locale.Language) -> String {
+        let locale = Locale(identifier: "zh-Hans")
         var id = language.languageCode?.identifier ?? language.minimalIdentifier
-        if let script = language.script, language.languageCode == .chinese { id += "-\(script.identifier)" }
-        return Locale(identifier: "en").localizedString(forIdentifier: id) ?? id
+        if let script = language.script, language.languageCode == .chinese {
+            id += "-\(script.identifier)"
+        }
+        return locale.localizedString(forIdentifier: id) ?? id
     }
 
     private static func detectLanguage(_ text: String) -> Locale.Language? {

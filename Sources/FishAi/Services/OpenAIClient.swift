@@ -20,6 +20,33 @@ enum OpenAIClient {
         _ text: String, from: String, to: String, config: Config,
         onDelta: @MainActor (String) -> Void
     ) async throws {
+        // 支持在连接建立失败时自动重试 1 次（指数退避）
+        var attempts = 0
+        while true {
+            attempts += 1
+            do {
+                try await performRequest(text, from: from, to: to, config: config, onDelta: onDelta)
+                return
+            } catch let error as URLError where attempts < 2 && isRetryable(error) {
+                try? await Task.sleep(nanoseconds: 800_000_000) // 800ms
+                continue
+            }
+        }
+    }
+
+    private static func isRetryable(_ error: URLError) -> Bool {
+        switch error.code {
+        case .timedOut, .cannotConnectToHost, .networkConnectionLost, .dnsLookupFailed:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func performRequest(
+        _ text: String, from: String, to: String, config: Config,
+        onDelta: @MainActor (String) -> Void
+    ) async throws {
         let fill = { (template: String) in
             template
                 .replacingOccurrences(of: "{from}", with: from)
@@ -33,7 +60,7 @@ enum OpenAIClient {
 
         var request = URLRequest(url: try endpoint(config.baseURL))
         request.httpMethod = "POST"
-        request.timeoutInterval = 60
+        request.timeoutInterval = 45
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !config.apiKey.isEmpty {
             request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
