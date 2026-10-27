@@ -1,21 +1,31 @@
 #!/bin/bash
 # 构建 FishAi.app 到 build/
-#   ./build.sh           开发构建：本机架构，FishAi Dev 证书（或 ad-hoc）签名
-#   ./build.sh release   发布构建：通用二进制，Developer ID 签名 → 打包 dmg → 公证 → 装订
+#   ./build.sh             开发构建：本机架构，FishAi Dev 证书（或 ad-hoc）签名
+#   ./build.sh community   社区版：通用二进制，FishAi Dev 证书签名 → 打包 dmg（不公证，免费）
+#   ./build.sh release     正式版：通用二进制，Developer ID 签名 → 打包 dmg → 公证 → 装订
 set -euo pipefail
 cd "$(dirname "$0")"
 
 MODE="${1:-dev}"
 case "$MODE" in
-    dev|release) ;;
-    *) echo "usage: $0 [dev|release]" >&2; exit 1 ;;
+    dev|community|release) ;;
+    *) echo "usage: $0 [dev|community|release]" >&2; exit 1 ;;
 esac
 
 VERSION="0.1.0"
 BUILD_NUMBER="1"
 
 # 发布构建先检查证书和公证凭据，避免编译完才失败
-if [ "$MODE" = release ]; then
+if [ "$MODE" = community ]; then
+    # 每个版本都必须用同一张证书签名：用户更新后，屏幕录制、辅助功能授权才不会失效。
+    # ad-hoc 签名按每次构建的 cdhash 识别应用，不能用于分发
+    IDENTITY="${FISHAI_SIGN_IDENTITY:-FishAi Dev}"
+    if ! security find-identity -p codesigning | grep -q "\"$IDENTITY\""; then
+        echo "error: signing identity \"$IDENTITY\" not found; create it as described in DEVELOPMENT.md" >&2
+        exit 1
+    fi
+    SWIFT_ARGS=(-c release --arch arm64 --arch x86_64)
+elif [ "$MODE" = release ]; then
     # 默认取钥匙串里第一个 Developer ID Application 证书，也可以用 FISHAI_DEVELOPER_ID 指定
     IDENTITY="${FISHAI_DEVELOPER_ID:-$(security find-identity -v -p codesigning \
         | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -n 1)}"
@@ -78,20 +88,33 @@ if [ "$MODE" = dev ]; then
     exit 0
 fi
 
+DMG="build/FishAi-$VERSION.dmg"
+
+# 打包 dmg：内含 FishAi.app 和指向 /Applications 的快捷方式，并附 SHA-256 校验文件供发布页使用
+make_dmg() {
+    local staging="build/dmg"
+    rm -rf "$staging" "$DMG" "$DMG.sha256"
+    mkdir -p "$staging"
+    cp -R "$APP" "$staging/"
+    ln -s /Applications "$staging/Applications"
+    hdiutil create -volname "FishAi" -srcfolder "$staging" -fs HFS+ -format UDZO "$DMG"
+    rm -rf "$staging"
+    /usr/bin/codesign --force "$@" --sign "$IDENTITY" "$DMG"
+    (cd build && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256")
+}
+
+if [ "$MODE" = community ]; then
+    /usr/bin/codesign --force --sign "$IDENTITY" "$APP"
+    /usr/bin/codesign --verify --strict --verbose=2 "$APP"
+    make_dmg
+    echo "Built $DMG (community, not notarized)"
+    exit 0
+fi
+
 # 公证要求开启 Hardened Runtime 并带安全时间戳
 /usr/bin/codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
 /usr/bin/codesign --verify --strict --verbose=2 "$APP"
-
-# 打包 dmg：内含 FishAi.app 和指向 /Applications 的快捷方式
-DMG="build/FishAi-$VERSION.dmg"
-STAGING="build/dmg"
-rm -rf "$STAGING" "$DMG"
-mkdir -p "$STAGING"
-cp -R "$APP" "$STAGING/"
-ln -s /Applications "$STAGING/Applications"
-hdiutil create -volname "FishAi" -srcfolder "$STAGING" -fs HFS+ -format UDZO "$DMG"
-rm -rf "$STAGING"
-/usr/bin/codesign --force --timestamp --sign "$IDENTITY" "$DMG"
+make_dmg --timestamp
 
 # 公证 dmg（里面的 .app 一并公证），再把公证票据装订到 dmg 和本地的 .app 上
 NOTARY_OUT="$(xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait | tee /dev/stderr)"

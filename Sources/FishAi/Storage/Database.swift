@@ -225,9 +225,11 @@ final class Database {
                 WHERE system_prompt LIKE '%You are a professional editor%' OR name = '润色'
                 """, [.text(chinesePolishPrompt)])
 
-            // 补充总结摘要提示词（若不存在）
+            // 老用户补充总结摘要提示词（若不存在）。全新安装时 prompts 为空，由 AppSettings 按顺序预置，
+            // 这里不插入，否则它会排在「通用翻译」前面成为默认提示词
+            let promptCount = (try? query("SELECT COUNT(*) FROM prompts") { $0.int(0) }.first) ?? 0
             let summaryCount = (try? query("SELECT COUNT(*) FROM prompts WHERE name = '总结摘要'") { $0.int(0) }.first) ?? 0
-            if summaryCount == 0 {
+            if promptCount > 0 && summaryCount == 0 {
                 insertPrompt(PromptTemplate(id: 0, name: "总结摘要", systemPrompt: """
                     你是一名高效的信息分析与摘要专家。请使用 {to} 对用户提供的文本进行结构化提炼：
                     1. 一句话结论：用最凝练的一句话概括核心结论或主旨。

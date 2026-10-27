@@ -118,7 +118,10 @@ final class AppSettings: ObservableObject {
         models = db.fetchModels()
         prompts = db.fetchPrompts()
         selectedModelID = Self.validID(defaults.object(forKey: Key.selectedModelID), in: models.map(\.id))
-        selectedPromptID = Self.validID(defaults.object(forKey: Key.selectedPromptID), in: prompts.map(\.id))
+        // 还没选过提示词时默认用翻译提示词；已有的选择保持不变
+        let translationPromptID = prompts.first { ["通用翻译", "翻译"].contains($0.name) }?.id
+        selectedPromptID = Self.validID(defaults.object(forKey: Key.selectedPromptID), in: prompts.map(\.id),
+                                        fallback: translationPromptID)
         // 系统翻译成为默认模型（只切换一次，之后尊重用户的选择）
         if !defaults.bool(forKey: Key.systemModelDefaulted) {
             selectedModelID = models.first(where: \.isSystem)?.id ?? selectedModelID
@@ -126,9 +129,9 @@ final class AppSettings: ObservableObject {
         }
     }
 
-    private static func validID(_ stored: Any?, in ids: [Int64]) -> Int64? {
+    private static func validID(_ stored: Any?, in ids: [Int64], fallback: Int64? = nil) -> Int64? {
         if let id = (stored as? NSNumber)?.int64Value, ids.contains(id) { return id }
-        return ids.first
+        return fallback ?? ids.first
     }
 
     // MARK: - 模型
